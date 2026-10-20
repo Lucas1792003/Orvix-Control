@@ -5,7 +5,7 @@
 // - Sets the control_app password OUT OF BAND (never in a migration file).
 import pg from "pg";
 import { loadDevEnv, superuserConfig } from "./env";
-import { migrate, setAppPassword } from "./migrator";
+import { clusterExposure, migrate, setAppPassword } from "./migrator";
 
 async function main() {
   loadDevEnv();
@@ -18,6 +18,12 @@ async function main() {
     if (applied.length === 0) console.log("no pending migrations");
     await setAppPassword(client, process.env.ORVIX_DB_APP_PASSWORD!);
     console.log("control_app password set (out of band)");
+    const exposure = await clusterExposure(client);
+    for (const w of exposure) console.log(`CLUSTER NOT HARDENED: ${w}`);
+    if (exposure.length) {
+      console.log("Migrations are applied, but the cluster is exposed (see docs/MIGRATIONS_C1_3.md). The app and the sentinel refuse to run while their role can reach a non-control or unhardened database.");
+      process.exitCode = 3;
+    }
   } finally {
     await client.end();
   }

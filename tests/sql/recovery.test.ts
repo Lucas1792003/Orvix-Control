@@ -120,8 +120,8 @@ describe("limits", () => {
       const o = await ownerWithSession(solo);
       const r = (await solo.su.query("SELECT control.host_recovery_request('owner@example.invalid', 'synthetic: single owner lost key') AS r")).rows[0].r;
       expect(r.ok).toBe(true);
-      // The only owner is the subject; nobody else can approve.
-      expect((await stepup(solo, o.token, o.auth, "recovery_approve", r.request_id)).ok).toBe(true);
+      // The only owner is the subject; nobody else can approve. C1.3: an owner under recovery cannot even step up for it.
+      expect((await solo.api("api_stepup_begin", o.token, "recovery_approve", r.request_id)).error).toBe("IDENTITY_UNDER_RECOVERY");
       expect((await solo.api("api_recovery_approve", o.token, r.request_id)).error).toBe("SELF_APPROVAL_FORBIDDEN");
       const { rows } = await solo.su.query("SELECT count(*)::int n FROM control.platform_identities WHERE role = 'owner' AND state = 'active'");
       expect(rows[0].n).toBe(1);

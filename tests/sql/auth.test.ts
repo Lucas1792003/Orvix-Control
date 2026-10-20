@@ -162,10 +162,15 @@ describe("login", () => {
       const { rows } = await db2.su.query("SELECT disabled_at, counter_suspect_at FROM control.webauthn_credentials");
       expect(rows[0].disabled_at).toBeNull();
       expect(rows[0].counter_suspect_at).not.toBeNull();
-      expect((await db2.api("api_session_get", o.token))).toMatchObject({ ok: true, flagged_credentials: 1 });
-      expect((await login(db2, o.auth)).ok).toBe(true); // a fresh, increasing counter still works
+      // C1.3: a possible clone's sessions end at once; sign-in still works (no lockout), privileged use does not
+      expect((await db2.api("api_session_get", o.token)).error).toBe("UNAUTHENTICATED");
+      const again = await login(db2, o.auth);            // a fresh, increasing counter still signs in
+      expect(again.ok).toBe(true);
+      expect((await db2.api("api_session_get", again.session_token))).toMatchObject({ ok: true, flagged_credentials: 1 });
+      const s = await db2.api("api_stepup_begin", again.session_token, "credential_add", o.identityId);
+      expect(s.credential_ids).toEqual([]);              // a flagged passkey is not offered for step-up
       const ev = (await lastAudit(db2, 5)).find((e) => e.action === "platform.credential_counter_regression");
-      expect(ev?.detail).toEqual({ stored: 1, presented: 1 });
+      expect(ev?.detail).toEqual({ stored: 1, presented: 1, sessions_revoked: 1 });
     } finally {
       await db2.drop();
     }

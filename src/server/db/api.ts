@@ -1,6 +1,7 @@
 import "server-only";
 import pg from "pg";
 import { config } from "../config";
+import { PRIVILEGE_CHECK_SQL, privilegeProblems, type PrivilegeRow } from "./privilegeCheck";
 
 // The ONLY database access path in the app: control_app calling control.api_* functions.
 // No table is ever queried directly; control_app has no table privileges anyway.
@@ -63,12 +64,14 @@ export type ApiResult = { ok: true; [k: string]: unknown } | { ok: false; error:
 async function ensureContract(): Promise<void> {
   if (globalForPool.__orvixContractCheckedAt && Date.now() - globalForPool.__orvixContractCheckedAt < RECHECK_MS) return;
   // Startup integrity checks (fail closed): expected contract and cluster; every SECURITY DEFINER function in
-  // `control` still pins search_path; this role's defaults have not been altered; no prepared transactions.
+  // `control` pins a search_path ending in pg_temp; this role's defaults have not been altered; no prepared
+  // transactions; (C1.3 M3/M4) the control database's ACL grants nothing to PUBLIC and no TEMP to this role, this role
+  // cannot CONNECT to any non-control database, and the 217 built-in revocations are in place.
   const { rows } = await pool().query(`
     SELECT control.api_contract_version() AS v, current_setting('cluster_name') AS cluster,
            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE n.nspname = 'control' AND p.prosecdef
-               AND NOT coalesce(EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%'), false))::int AS unpinned,
+               AND NOT coalesce(EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%pg_temp'), false))::int AS unpinned,
            (SELECT rolconfig FROM pg_roles WHERE rolname = current_user) AS rolconfig,
            (SELECT count(*) FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole
              WHERE r.rolname = current_user AND s.setdatabase <> 0)::int AS per_db,
@@ -76,6 +79,7 @@ async function ensureContract(): Promise<void> {
            current_setting('idle_in_transaction_session_timeout') AS it, current_setting('temp_file_limit') AS tfl,
            current_setting('transaction_timeout') AS tt, current_setting('max_prepared_transactions') AS mpt,
            current_setting('default_transaction_read_only') AS ro, current_setting('row_security') AS rs`);
+  const priv = await pool().query<PrivilegeRow>(PRIVILEGE_CHECK_SQL);
   const cfg: string[] = rows[0]?.rolconfig ?? [];
   // the role's defaults must be EXACTLY this set (no extra or replaced entries)
   const expected = ["search_path=control, pg_catalog", "statement_timeout=5s", "idle_in_transaction_session_timeout=10s",
@@ -85,7 +89,8 @@ async function ensureContract(): Promise<void> {
       || JSON.stringify([...cfg].sort()) !== JSON.stringify(expected) || r0.per_db !== 0
       || r0.lt !== "3s" || r0.it !== "10s" || r0.tfl !== "256MB" || r0.tt !== "10s" || r0.ro !== "off" || r0.rs !== "on"
       // prepared transactions would survive the watchdog and hold locks forever
-      || r0.mpt !== "0") {
+      || r0.mpt !== "0"
+      || privilegeProblems(priv.rows[0]).length > 0) {
     throw new Error("CONTRACT_MISMATCH");
   }
   globalForPool.__orvixContractCheckedAt = Date.now();   // re-checked every 30 s (fail closed on drift)

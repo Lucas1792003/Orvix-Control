@@ -6,16 +6,24 @@ services:
     image: postgres:17
     container_name: orvix-control-db
     restart: "no"
+    # C1.3: a minimal init as PID 1 reaps orphaned processes (e.g. an interrupted `docker exec ... pg_dump | ...`).
+    # With postgres itself as PID 1, an orphan dying by a signal is treated as a crashed backend: the whole cluster
+    # restarts (found in C1.3 testing).
+    init: true
     environment:
       POSTGRES_DB: orvix_control
       POSTGRES_USER: orvix_control_super
       POSTGRES_PASSWORD: ${ORVIX_DB_SUPERUSER_PASSWORD:?run npm run db:up}
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
-    command: ["postgres", "-c", "password_encryption=scram-sha-256", "-c", "log_statement=none", "-c", "cluster_name=orvix-control-dev"]
+    # C1.3: hardened pg_hba (control roles may reach only control databases) and a small NOTIFY queue. Takes effect only
+    # when the container is recreated (owner decision; see docs/MIGRATIONS_C1_3.md "Cluster prerequisites").
+    command: ["postgres", "-c", "password_encryption=scram-sha-256", "-c", "log_statement=none", "-c", "cluster_name=orvix-control-dev",
+              "-c", "hba_file=/etc/orvix/pg_hba.conf", "-c", "max_notify_queue_pages=1024"]
     ports:
       - "127.0.0.1:55440:5432"
     volumes:
       - orvix-control-pgdata:/var/lib/postgresql/data
+      - ./db/cluster/pg_hba.conf:/etc/orvix/pg_hba.conf:ro
     networks:
       - orvix-control-net
     healthcheck:

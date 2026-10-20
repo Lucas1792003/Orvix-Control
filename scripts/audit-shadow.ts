@@ -24,29 +24,41 @@ const MARK = "ORVIX_AUDIT_SHADOW ";
 const LINE = /ORVIX_AUDIT_SHADOW ([0-9a-f]{64}) (\{.*\})\s*$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export type ParsedShadow = { lines: ShadowLine[]; forged: number; foreign: number };
+// C1.3: categories instead of one "forged" bucket (C1.2 runtime LOW-6: false alarms after an upgrade).
+//   forged    : MAC-format line naming THIS database whose MAC does not verify (alarm)
+//   foreign   : MAC-format line for another database (expected on a shared cluster)
+//   legacy    : pre-217 format (no MAC, no database name) from before the upgrade; never trusted, not an alarm
+//   malformed : carries the marker but is neither (statement echoes of marker text, truncated lines); not trusted
+export type ParsedShadow = { lines: ShadowLine[]; forged: number; foreign: number; legacy: number; malformed: number };
+const LEGACY = /ORVIX_AUDIT_SHADOW (\{.*\})\s*$/;
 
 // Only lines whose MAC verifies with this database's key AND that name this database are returned.
 export function parseShadowLog(text: string, key: Buffer, database: string): ParsedShadow {
   const out: ShadowLine[] = [];
-  let forged = 0, foreign = 0;
+  let forged = 0, foreign = 0, legacy = 0, malformed = 0;
   for (const raw of text.split("\n")) {
     if (!raw.includes(MARK)) continue;
     const m = LINE.exec(raw);
-    if (!m) { forged++; continue; }
+    if (!m) {
+      const l = LEGACY.exec(raw);
+      let j: Record<string, unknown> | null = null;
+      try { j = l ? JSON.parse(l[1]!) : null; } catch { j = null; }
+      if (j && typeof j.shadow_id === "string" && !("db" in j)) legacy++; else malformed++;
+      continue;
+    }
     const mac = createHmac("sha256", key).update(m[2]!, "utf8").digest();
     const given = Buffer.from(m[1]!, "hex");
     let j: Partial<ShadowLine>;
-    try { j = JSON.parse(m[2]!); } catch { forged++; continue; }
+    try { j = JSON.parse(m[2]!); } catch { malformed++; continue; }
     if (!timingSafeEqual(mac, given)) {
       // a line from another database is expected noise; a line naming THIS database with a bad MAC is a forgery
       if (j.db !== database) foreign++; else forged++;
       continue;
     }
-    if (j.db !== database || typeof j.shadow_id !== "string" || !UUID.test(j.shadow_id)) { forged++; continue; }
+    if (j.db !== database || typeof j.shadow_id !== "string" || !UUID.test(j.shadow_id)) { malformed++; continue; }
     out.push(j as ShadowLine);
   }
-  return { lines: out, forged, foreign };
+  return { lines: out, forged, foreign, legacy, malformed };
 }
 
 export async function shadowKey(client: pg.Client | pg.Pool): Promise<Buffer> {
@@ -77,9 +89,9 @@ async function main() {
     const parsed = parseShadowLog(readFileSync(process.argv[i + 1]!, "utf8"), await shadowKey(client), database);
     const r = await reconcile(client, parsed.lines);
     console.log(`database ${safe(database)}: verified shadow lines ${r.checked}; committed ${r.committed}; ` +
-      `rolled back ${r.rolledBack.length}; forged ${parsed.forged}; other databases ${parsed.foreign}`);
+      `missing ${r.rolledBack.length}; forged ${parsed.forged}; other databases ${parsed.foreign}; legacy ${parsed.legacy}; malformed ${parsed.malformed}`);
     for (const s of r.rolledBack) {
-      console.log(`  ROLLED BACK xid=${safe(String(s.xid))} at=${safe(String(s.at))} user=${safe(String(s.session_user))} ` +
+      console.log(`  MISSING (rolled back or deleted) xid=${safe(String(s.xid))} at=${safe(String(s.at))} user=${safe(String(s.session_user))} ` +
         `action=${safe(String(s.action))} outcome=${safe(String(s.outcome))} reason=${safe(String(s.reason_code))} ` +
         `target=${safe(String(s.target_type))}:${safe(String(s.target_id))}`);
     }

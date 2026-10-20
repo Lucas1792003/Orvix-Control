@@ -46,6 +46,8 @@ export const ERROR_TEXT: Record<string, string> = {
   CREDENTIAL_PENDING: "That passkey is still pending: it activates 15 minutes after its out-of-band notice was delivered.",
   NOTIFICATION_PENDING: "Waiting for the out-of-band security notice to be delivered. Try again in a minute; if it persists, the host must check the sentinel.",
   ALREADY_EXISTS: "An operator or open invitation already exists for that email.",
+  IDENTITY_UNDER_RECOVERY: "Your account has an open recovery request. Privileged actions are paused until it is completed or cancelled.",
+  CREDENTIAL_FLAGGED: "This passkey was flagged as possibly cloned. Use another passkey, or have it revoked.",
 };
 
 export function downloadJson(name: string, data: unknown) {

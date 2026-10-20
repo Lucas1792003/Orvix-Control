@@ -21,10 +21,12 @@
     "bootstrap-owner": "tsx scripts/bootstrap-owner.ts",
     "test": "vitest run",
     "test:e2e": "bash scripts/preflight.sh && next build && vitest run --config vitest.e2e.config.mts",
+    "test:crash": "vitest run --config vitest.crash.config.mts",
     "audit:verify": "tsx scripts/verify-audit.ts",
     "audit:keygen": "tsx scripts/anchor-keygen.ts",
     "audit:sign": "tsx scripts/anchor-sign.ts",
     "audit:shadow": "tsx scripts/audit-shadow.ts",
+    "harden-cluster": "tsx scripts/harden-cluster.ts",
     "sentinel": "tsx scripts/sentinel.ts",
     "host": "tsx scripts/host.ts"
   },

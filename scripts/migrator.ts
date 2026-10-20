@@ -70,7 +70,61 @@ export async function migrate(client: pg.Client, opts: { statusOnly?: boolean; l
       throw new Error(`migration ${f} failed and was rolled back: ${(e as Error).message}`);
     }
   }
+  if (applied.has("200") || done.some((f) => f.startsWith("200_"))) await enforceDatabaseAcl(client);
   return { applied: done };
+}
+
+// C1.3 M4: the control database's ACL is re-asserted on EVERY run (also when nothing is pending), so a restore into a
+// plain CREATE DATABASE (PUBLIC default ACL: CONNECT + TEMP for every role) is corrected by the next migrate.
+export async function enforceDatabaseAcl(client: pg.Client) {
+  const { rows } = await client.query(
+    `SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC, ' || string_agg(quote_ident(rolname), ', '), current_database()) AS r,
+            format('GRANT CONNECT ON DATABASE %I TO control_app', current_database()) AS a,
+            CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'control_sentinel')
+                 THEN format('GRANT CONNECT ON DATABASE %I TO control_sentinel', current_database()) END AS s
+       FROM pg_roles WHERE rolname IN ('control_app', 'control_sentinel')`);
+  await client.query(rows[0].r);
+  await client.query(rows[0].a);
+  if (rows[0].s) await client.query(rows[0].s);
+}
+
+// C1.3 M3: cluster-wide exposure of the control roles. Database ACLs (what they may CONNECT to) and pg_hba, evaluated
+// in order: for each control role and each probe database, the FIRST matching rule (TCP and local socket) must reject.
+// Returned as findings for the host (scripts/harden-cluster.ts, db/cluster/pg_hba.conf); the app and the sentinel
+// themselves REFUSE to run while their role can CONNECT to a non-control or unhardened database.
+export async function clusterExposure(client: pg.Client): Promise<string[]> {
+  const out: string[] = [];
+  const dbs = await client.query(
+    `SELECT r.rolname, d.datname FROM pg_database d CROSS JOIN pg_roles r
+      WHERE r.rolname IN ('control_app', 'control_sentinel') AND d.datallowconn AND d.datname <> current_database()
+        AND d.datname !~ '^orvix_control(_e2e|_test_[a-z0-9]{6,16})?$' AND has_database_privilege(r.oid, d.oid, 'CONNECT')
+      ORDER BY 1, 2`);
+  for (const r of dbs.rows) out.push(`${r.rolname} can CONNECT to non-control database ${r.datname}`);
+  const rules = await client.query(
+    `SELECT line_number, type, database, user_name, address, netmask, auth_method FROM pg_hba_file_rules WHERE error IS NULL ORDER BY line_number`)
+    .catch(() => null);
+  if (!rules) { out.push("pg_hba rules could not be read"); return out; }
+  const matchDb = (list: string[], name: string) => list.some((d) =>
+    d === "all" || d === name || (d.startsWith("/") && new RegExp(d.slice(1)).test(name)));
+  // group (+role), file (@file) and samerole entries may include the role: treat them as matching
+  const matchUser = (list: string[], role: string) => list.some((u) => u === "all" || u === role || u === "samerole" || u.startsWith("+") || u.startsWith("@"));
+  // a reject only protects every client if it covers every address
+  const coversAll = (r: { type: string; address: string | null; netmask: string | null }) =>
+    r.type === "local" || r.address === "all" || ((r.address === "0.0.0.0" || r.address === "::") && (r.netmask === "0.0.0.0" || r.netmask === "::"));
+  for (const role of ["control_app", "control_sentinel"]) {
+    for (const db of ["postgres", "template1", "orvix_probe_noncontrol"]) {
+      for (const kind of ["host", "local"]) {
+        const first = rules.rows.find((r) => (kind === "local" ? r.type === "local" : r.type !== "local")
+          && matchDb(r.database ?? [], db) && matchUser(r.user_name ?? [], role));
+        if (first && first.auth_method !== "reject") {
+          out.push(`pg_hba line ${first.line_number} lets ${role} reach ${db} over ${kind === "local" ? "the local socket" : "TCP"} (${first.auth_method})`);
+        } else if (first && !coversAll(first)) {
+          out.push(`pg_hba line ${first.line_number} rejects ${role} for ${db} only from some addresses`);
+        }
+      }
+    }
+  }
+  return out;
 }
 
 // Out-of-band credential step: set control_app's password (dev/test only).
@@ -109,6 +163,20 @@ export async function setAppPassword(client: pg.Client, password: string) {
     const { rows: sp } = await client.query(`SELECT format('ALTER ROLE control_sentinel PASSWORD %L', $1::text) AS stmt`,
       [process.env.ORVIX_DB_SENTINEL_PASSWORD]);
     await client.query(sp[0].stmt);
+  }
+  if (sentinel.rowCount) {
+    // C1.3 review: the sentinel role can also ALTER its own defaults; restore the canonical set (cluster-wide) every run
+    await client.query(`ALTER ROLE control_sentinel RESET ALL`);
+    const sdbs = await client.query(
+      `SELECT d.datname FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole JOIN pg_database d ON d.oid = s.setdatabase
+        WHERE r.rolname = 'control_sentinel'`);
+    for (const row of sdbs.rows) {
+      const { rows: st } = await client.query(`SELECT format('ALTER ROLE control_sentinel IN DATABASE %I RESET ALL', $1::text) AS s`, [row.datname]);
+      await client.query(st[0].s);
+    }
+    await client.query(`ALTER ROLE control_sentinel SET search_path = control, pg_catalog`);
+    await client.query(`ALTER ROLE control_sentinel SET statement_timeout = '10s'`);
+    await client.query(`ALTER ROLE control_sentinel SET idle_in_transaction_session_timeout = '10s'`);
   }
   await client.query("COMMIT");
   } catch (e) {

@@ -45,8 +45,9 @@ async function loginWith(auth: SoftAuthenticator, assertOpts = {}) {
 
 beforeAll(async () => {
   db = await createTestDb({ name: "orvix_control_e2e", seed: true });
-  server = spawn("npx", ["next", "start", "--hostname", "localhost", "--port", "3410"], {
-    cwd: ROOT,
+  // `next` directly (not via npx) in its OWN process group, so teardown ends next-server too (C1.2 runtime LOW: orphans)
+  server = spawn(process.execPath, [`${ROOT}/node_modules/next/dist/bin/next`, "start", "--hostname", "localhost", "--port", "3410"], {
+    cwd: ROOT, detached: true,
     // the server gets only what a real deployment gives it: no host (superuser) or sentinel secrets
     env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/SUPERUSER|SENTINEL/.test(k))),
            ORVIX_DB_NAME: "orvix_control_e2e", NODE_ENV: "production" }, stdio: ["ignore", "pipe", "pipe"],
@@ -64,7 +65,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  server?.kill("SIGTERM");
+  if (server?.pid) { try { process.kill(-server.pid, "SIGTERM"); } catch { /* already gone */ } }
   await new Promise((r) => setTimeout(r, 500));
   await db?.drop();
 });
@@ -302,7 +303,14 @@ describe("passkey enrolment, login, step-up, logout", () => {
     expect(rows[0].counter_suspect_at).not.toBeNull();
     const ev = await db.su.query("SELECT count(*)::int n FROM control.audit_events WHERE action = 'platform.credential_counter_regression'");
     expect(ev.rows[0].n).toBe(1);
-    await db.su.query("UPDATE control.webauthn_credentials SET counter_suspect_at = NULL");
+    // C1.3: a possible clone's sessions end immediately (the console session signed in with this passkey too)
+    expect((await req("/api/auth/session", { cookie })).status).toBe(401);
+    await db.su.query("UPDATE control.webauthn_credentials SET counter_suspect_at = NULL");   // the owner reviewed it
+    await db.su.query("DELETE FROM control.rate_limits");
+    const again = await loginWith(auth);
+    expect(again.status).toBe(200);
+    cookie = cookieFrom(again)!;
+    csrf = (await req("/api/auth/session", { cookie })).body.csrf;
   });
 
   it("a known device keeps signing in while anonymous login challenges are exhausted (213)", async () => {

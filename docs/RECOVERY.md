@@ -35,6 +35,17 @@ With two active owners, the existing two-person recovery covers the loss of one 
 
 **Limits of the activation check (be precise).** Against a compromised console origin, the invitee sees only what the console shows them. The public-key fingerprint stops an attacker who **intercepted the link** (their key gives a different fingerprint from the one the real invitee reads out, and the link is single-use, so the real invitee's own enrolment fails and they notice). It does **not** stop a compromised origin that swaps its own key into the invitee's ceremony **and** shows the invitee the attacker's fingerprint. In that case the host and the invitee agree on the attacker's key. That case is detected only when the real invitee's first sign-in fails, after activation. See R-11.
 
+**C1.3 recovery rules.**
+- Redeeming a recovery **voids** every open invitation the subject issued and every recovery link the subject approved. Each is audited (`INVITER_RECOVERED`, `APPROVER_RECOVERED`) and announced.
+- Host activation and recovery redemption refuse an inviter or approver who was recovered **after** acting.
+- Any emergency revoke after the subject's last recovery contests the request; there is no 24 h window any more.
+- If the subject uses a passkey **after** the approval, redemption is refused (`RECOVERY_CONTESTED`) and the request returns to pending.
+- While an owner has an open recovery request:
+  - every step-up action and anchor signing is paused (`IDENTITY_UNDER_RECOVERY`); revoking a passkey, revoking an invitation and contesting their own request still work;
+  - invitations they issued cannot be activated (`INVITER_UNDER_RECOVERY`), and recovery links they approved cannot be redeemed (`APPROVER_UNDER_RECOVERY`);
+  - the subject's own contest does **not** end the pause: the host or another owner must cancel the request.
+- A passkey flagged as possibly cloned loses its sessions and cannot be used for step-up or anchors, and it does not count as usable for `LAST_OWNER` or `LAST_CREDENTIAL`. Sign-in still works.
+
 **If every owner loses every passkey**, nobody can approve a recovery. The only remedy is a database restore or reinstall by the infrastructure owner. Keep two owners with two passkeys each (R-3).
 
 ## Owner decisions (C1.2 review; nothing below is decided by this implementation)
@@ -52,6 +63,7 @@ With two active owners, the existing two-person recovery covers the loss of one 
 | R-9 (new) | Notification channels | At least one **host** channel is required for gated actions (fail closed). Every recipient channel in a notice's snapshot must succeed, so **one permanently failing or disabled channel blocks every gated action** until it recovers (a disabled channel never recovers: redo the action). Deliveries are retried forever with backoff capped at 300 s. | Require a per-owner channel as well; exclude emergency-revoked owners' channels from the snapshot; let the host waive a delivery; choose a webhook target (self-hosted ntfy, Matrix or SMTP relay); retention for the file channel. |
 | R-10 (new) | Admin invitations and re-invitation | Same two-party flow as owners. A never-activated identity can be re-invited (217); an active or once-active one cannot. | Lighter flow for admins (owner-only approval), since admins cannot recover or invite; forbid re-invitation of revoked emails. |
 | R-11 (new) | Strength of operator activation against a compromised console | Public-key fingerprint read back between host and invitee (217); detection on first failed sign-in | Require the new operator's first successful sign-in, confirmed through **their own** out-of-band channel, before any privileged action; or require a different owner to approve on a separate device (R-1 a). |
+| R-13 (C1.3) | First sign-in from a never-enrolled browser | Shared anonymous login bucket (20 per 15 min) for browsers that never completed an enrolment; every enrolment (bootstrap, invite, recovery) now gives that browser its own bucket | Per-client-IP limits behind a **trusted** reverse proxy; a higher anonymous limit with proof-of-work; accept the residual. |
 | R-12 (new) | Device tokens | At most 5 live device tokens per identity (least recently used revoked); 400-day TTL; the anonymous bucket is shared | Larger or smaller cap; per-scope ceiling reservations. |
 
 ## Historical: C1.1 blocked decisions (superseded by the table above)

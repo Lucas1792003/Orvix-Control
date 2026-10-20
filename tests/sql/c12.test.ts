@@ -59,7 +59,7 @@ describe("RM-1 out-of-band notifications", () => {
   it("a compromised app credential cannot read, skip, edit or fake notices, channels or deliveries", async () => {
     for (const sql of ["SELECT * FROM control.notify_outbox", "SELECT * FROM control.notify_channels", "SELECT * FROM control.notify_deliveries",
       "DELETE FROM control.notify_outbox", "UPDATE control.notify_deliveries SET delivered_at = now()",
-      "SELECT * FROM control.sentinel_claim(10)", "SELECT control.sentinel_ack(1, 1, true, NULL)",
+      "SELECT * FROM control.sentinel_claim(10, NULL)", "SELECT control.sentinel_ack(1, 1, gen_random_uuid(), true, NULL)",
       "SELECT control.host_add_notify_channel('host', NULL, 'file', '/tmp/x', NULL)", "SELECT control.host_disable_notify_channel(1)",
       "SELECT control.notification_delivered('a','b','c')"]) {
       expect(await errCode(db.app.query(sql)), sql).toBe("42501");
@@ -72,7 +72,8 @@ describe("RM-1 out-of-band notifications", () => {
       const { rows } = await db.su.query(
         `SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE n.nspname = 'control' AND has_function_privilege('control_sentinel', p.oid, 'EXECUTE') ORDER BY 1`);
-      expect(rows.map((r) => r.proname)).toEqual(["sentinel_ack", "sentinel_claim", "sentinel_watchdog"]);
+      expect(rows.map((r) => r.proname)).toEqual(["sentinel_ack", "sentinel_claim", "sentinel_pending_channels",
+        "watchdog_arm", "watchdog_execute", "watchdog_plan", "watchdog_reconcile"]);
       for (const sql of ["SELECT * FROM control.sessions", "SELECT * FROM control.notify_channels", "SELECT control.api_login_begin(NULL)",
         "SELECT control.host_approve_operator('a@example.invalid', 'x')", "UPDATE control.notify_deliveries SET delivered_at = now()"]) {
         expect(await errCode(sp.query(sql)), sql).toBe("42501");
@@ -169,7 +170,7 @@ describe("RM-1 out-of-band notifications", () => {
       await ownerWithSession(d);
       await d.su.query("SELECT control.host_recovery_request('owner@example.invalid', 'synthetic file channel test')");
       await deliverOnce(sp);
-      const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      const lines = readFileSync(file, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));   // C1.3: "\n" + JSON + "\n"
       expect(lines.map((l) => l.action)).toEqual(expect.arrayContaining(["platform.owner_enrolled", "platform.recovery_requested"]));
     } finally { await sp.end(); await d.drop(); }
   });
@@ -274,7 +275,10 @@ describe("RM-3 open transactions: watchdog and shadow audit evidence", () => {
       expect(await watchdogOnce(sp, 2, 15)).toBe(1);
       expect((await db.api("api_audit_verify", owner.token)).ok).toBe(true);
       const ev = (await lastAudit(db, 5)).find((e) => e.action === "platform.watchdog_terminated");
-      expect(ev?.detail.terminated).toBe(1);
+      expect(ev?.detail.state).toBe("terminated");
+      // one intent per acted-on backend (the C1.3 successor sweep may add one for a queued backend); all resolved + chained
+      expect((await db.su.query("SELECT count(*)::int n FROM control.notify_outbox WHERE action = 'platform.watchdog_intent'")).rows[0].n).toBeGreaterThanOrEqual(1);
+      expect((await db.su.query("SELECT count(*)::int n FROM control.watchdog_intents WHERE state IN ('planned', 'armed') OR audit_seq IS NULL")).rows[0].n).toBe(0);
       expect((await db.su.query("SELECT count(*)::int n FROM control.notify_outbox WHERE action = 'platform.watchdog_terminated'")).rows[0].n).toBe(1);
     } finally { holder.release(true); await sp.end(); }
   }, 20_000);
@@ -504,7 +508,8 @@ describe("migration upgrade and rollback drill (forward-only migrations + restor
       const c = new pg.Client({ ...superuserConfig(), database: d.name }); await c.connect();
       const { applied } = await migrate(c); await c.end();
       expect(applied).toEqual(["212_oob_notifications.sql", "213_scoped_login_limits.sql", "214_txn_watchdog_shadow_audit.sql",
-        "215_operator_invitations.sql", "216_review_211_fixes.sql", "217_review_c1_2_fixes.sql"]);
+        "215_operator_invitations.sql", "216_review_211_fixes.sql", "217_review_c1_2_fixes.sql",
+        "218_watchdog_intents.sql", "219_recovery_auth_hardening.sql", "220_sentinel_delivery.sql", "221_privileges_tenant_contract.sql"]);
       // "rollback": restore the pre-upgrade dump into a fresh database
       const admin = new pg.Client({ ...superuserConfig(), database: "orvix_control" }); await admin.connect();
       await admin.query(`CREATE DATABASE ${restored}`); await admin.end();
@@ -517,7 +522,7 @@ describe("migration upgrade and rollback drill (forward-only migrations + restor
         expect((await r.query("SELECT max(seq)::int s FROM control.audit_events")).rows[0].s).toBe(head211.s);
         expect((await r.query("SELECT * FROM control.audit_verify()")).rows[0].ok).toBe(true);
         const re = await migrate(r);
-        expect(re.applied).toHaveLength(6);
+        expect(re.applied).toHaveLength(10);
         expect((await r.query("SELECT * FROM control.audit_verify()")).rows[0].ok).toBe(true);
       } finally { await r.end(); }
     } finally {
@@ -569,7 +574,7 @@ describe("C1.2 role invariants (sentinel + watchdog owner)", () => {
     const { rows } = await db.su.query(`SELECT rolname, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolcanlogin, rolinherit, rolconnlimit
       FROM pg_roles WHERE rolname IN ('control_sentinel', 'control_watchdog_owner') ORDER BY 1`);
     expect(rows).toEqual([
-      { rolname: "control_sentinel", rolsuper: false, rolbypassrls: false, rolcreaterole: false, rolcreatedb: false, rolcanlogin: true, rolinherit: false, rolconnlimit: 3 },
+      { rolname: "control_sentinel", rolsuper: false, rolbypassrls: false, rolcreaterole: false, rolcreatedb: false, rolcanlogin: true, rolinherit: false, rolconnlimit: 12 },
       { rolname: "control_watchdog_owner", rolsuper: false, rolbypassrls: false, rolcreaterole: false, rolcreatedb: false, rolcanlogin: false, rolinherit: true, rolconnlimit: -1 },
     ]);
     const m = await db.su.query(`SELECT r.rolname AS role, m.rolname AS member FROM pg_auth_members a
@@ -580,7 +585,7 @@ describe("C1.2 role invariants (sentinel + watchdog owner)", () => {
       { role: "pg_signal_backend", member: "control_watchdog_owner" },
     ]);
     const owned = await db.su.query(`SELECT p.proname FROM pg_proc p WHERE pg_get_userbyid(p.proowner) = 'control_watchdog_owner'`);
-    expect(owned.rows.map((r) => r.proname)).toEqual(["sentinel_watchdog"]);
+    expect(owned.rows.map((r) => r.proname).sort()).toEqual(["watchdog_arm", "watchdog_assert_own_transaction", "watchdog_execute", "watchdog_plan", "watchdog_reconcile"]);
   });
 
   it("no runtime role (incl. the sentinel) can execute an invoker-rights function owned by a different runtime role", async () => {
@@ -595,7 +600,7 @@ describe("C1.2 role invariants (sentinel + watchdog owner)", () => {
   });
 
   it("control_app cannot run the watchdog or any sentinel/host function, and no new role has CREATE anywhere", async () => {
-    for (const fn of ["sentinel_watchdog", "sentinel_claim", "sentinel_ack", "host_add_notify_channel", "host_approve_operator", "host_notify_status"]) {
+    for (const fn of ["watchdog_execute", "watchdog_plan", "sentinel_claim", "sentinel_ack", "host_add_notify_channel", "host_approve_operator", "host_notify_status"]) {
       const { rows } = await db.su.query(`SELECT bool_or(has_function_privilege('control_app', p.oid, 'EXECUTE')) x
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'control' AND p.proname = $1`, [fn]);
       expect(rows[0].x, fn).toBe(false);
@@ -626,17 +631,24 @@ describe("C1.2 review fixes (217)", () => {
       const queued = cb.query("SELECT control.api_audit_verify($1)", [o.token]).catch(() => null); // B queues on the lock
       await sleep(2500);
       const t0 = Date.now();
-      const n = await watchdogOnce(sp, 2, 15);       // kills A; B inherits the lock and idles; the audit write must not stall
+      // C1.3 protocol: the kill is never stalled by the audit lock. B (queued behind A) is caught by the successor sweep
+      // in the same pass, or as an idle-in-transaction holder by the next pass; every pass is bounded.
+      let n = await watchdogOnce(sp, 2, 15);
       expect(Date.now() - t0).toBeLessThan(9000);
+      await sleep(2500);
+      const t1 = Date.now();
+      n += await watchdogOnce(sp, 2, 15);
+      expect(Date.now() - t1).toBeLessThan(9000);
       expect(n).toBeGreaterThanOrEqual(2);
       await queued;
-      const ev = (await lastAudit(d, 5)).find((e) => e.action === "platform.watchdog_terminated");
-      expect(ev?.detail.terminated).toBeGreaterThanOrEqual(2);
+      await watchdogOnce(sp, 2, 15);                    // fold anything left once the lock is free
+      const evs = (await d.su.query("SELECT count(*)::int n FROM control.audit_events WHERE action = 'platform.watchdog_terminated'")).rows[0].n;
+      expect(evs).toBeGreaterThanOrEqual(2);
       expect((await d.api("api_audit_verify", o.token)).ok).toBe(true);
     } finally { ca.release(true); cb.release(true); await sp.end(); await d.drop(); }
   }, 30_000);
 
-  it("H1 (re-review): the kill record and its notice are written WITHOUT the audit lock and folded into the chain later", async () => {
+  it("H1 (re-review, C1.3 protocol): the intent and its notice are written WITHOUT the audit lock and folded into the chain later", async () => {
     const d = await createTestDb({ seed: false });
     const sp = sentinelPool(d);
     const stale = await d.app.connect();
@@ -648,14 +660,14 @@ describe("C1.2 review fixes (217)", () => {
       await lockHolder.query("BEGIN"); await lockHolder.query("SELECT 1 FROM control.audit_lock FOR UPDATE");
       await sleep(2500);
       expect(await watchdogOnce(sp, 2, 15)).toBe(1);
-      const k = (await d.su.query("SELECT id, terminated, audit_seq FROM control.watchdog_kills")).rows;
-      expect(k).toEqual([{ id: expect.anything(), terminated: 1, audit_seq: null }]);
-      const o = (await d.su.query("SELECT count(*)::int n FROM control.notify_outbox WHERE action = 'platform.watchdog_terminated' AND audit_seq IS NULL")).rows[0].n;
-      expect(o).toBe(1);                              // announced immediately, even though the audit lock was held
-      expect((await d.su.query("SELECT control.host_notify_status() AS r")).rows[0].r.watchdog_kills_not_in_chain).toBe(1);
+      const k = (await d.su.query("SELECT state, audit_seq FROM control.watchdog_intents")).rows;
+      expect(k).toEqual([{ state: "terminated", audit_seq: null }]);
+      const o = (await d.su.query("SELECT count(*)::int n FROM control.notify_outbox WHERE action = 'platform.watchdog_intent' AND audit_seq IS NULL")).rows[0].n;
+      expect(o).toBe(1);                              // announced BEFORE the kill, even though the audit lock was held
+      expect((await d.su.query("SELECT control.host_notify_status() AS r")).rows[0].r.watchdog.not_in_chain).toBe(1);
       await lockHolder.query("ROLLBACK");
-      expect(await watchdogOnce(sp, 2, 15)).toBe(0);  // next pass folds the record into the hash chain
-      expect((await d.su.query("SELECT audit_seq FROM control.watchdog_kills")).rows[0].audit_seq).not.toBeNull();
+      expect(await watchdogOnce(sp, 2, 15)).toBe(0);  // next pass folds the intent into the hash chain
+      expect((await d.su.query("SELECT audit_seq FROM control.watchdog_intents")).rows[0].audit_seq).not.toBeNull();
       expect((await d.su.query("SELECT count(*)::int n FROM control.notify_outbox WHERE action = 'platform.watchdog_terminated'")).rows[0].n).toBe(1);
       expect((await d.su.query("SELECT * FROM control.audit_verify()")).rows[0].ok).toBe(true);
     } finally { stale.release(true); lockHolder.release(); await sp.end(); await d.drop(); }
@@ -699,7 +711,7 @@ describe("C1.2 review fixes (217)", () => {
       const other = JSON.stringify({ shadow_id: fakeId, db: "orvix_control_test_other00" });
       const t = [mk(other, randomBytes(32)), mk(JSON.stringify({ shadow_id: fakeId, db: d.name }), randomBytes(32)),
                  "ORVIX_AUDIT_SHADOW {\"shadow_id\":\"------------------------------------\"}"].join("\n");
-      expect(parseShadowLog(t, key, d.name)).toEqual({ lines: [], forged: 2, foreign: 1 });
+      expect(parseShadowLog(t, key, d.name)).toEqual({ lines: [], forged: 1, foreign: 1, legacy: 1, malformed: 0 });
       expect(await errCode(d.app.query("SELECT * FROM control.audit_shadow_key"))).toBe("42501");
     } finally { await d.drop(); }
   });
@@ -786,7 +798,8 @@ describe("C1.2 review fixes (217)", () => {
       expect((await stepup(d, b.token, b.auth, "recovery_approve", rq.request_id)).ok).toBe(true);
       const ap = await d.api("api_recovery_approve", b.token, rq.request_id);
       expect((await enrolWithToken(d, ap.enrolment_token, new SoftAuthenticator())).ok).toBe(true);
-      expect(await live()).toBe(0);
+      expect(await live()).toBe(1);                      // all old devices revoked; C1.3 M2: the recovering browser gets a fresh one
+      expect((await d.su.query("SELECT count(*)::int n FROM control.login_devices WHERE identity_id = $1 AND revoked_at IS NULL AND created_at < now() - interval '1 second'", [a.identityId])).rows[0].n).toBe(0);
     } finally { await d.drop(); }
   });
 

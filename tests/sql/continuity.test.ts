@@ -37,11 +37,11 @@ beforeAll(async () => {
   await c.end();
   expect(applied).toEqual(["204_webauthn_crypto.sql", "205_auth_trust_boundary.sql", "206_signed_audit_anchors.sql", "207_review_hardening.sql", "208_review_round2.sql", "209_review_round3.sql", "210_final_review.sql", "211_final_review_followup.sql",
       "212_oob_notifications.sql", "213_scoped_login_limits.sql", "214_txn_watchdog_shadow_audit.sql", "215_operator_invitations.sql",
-      "216_review_211_fixes.sql", "217_review_c1_2_fixes.sql"]);
+      "216_review_211_fixes.sql", "217_review_c1_2_fixes.sql", "218_watchdog_intents.sql", "219_recovery_auth_hardening.sql", "220_sentinel_delivery.sql", "221_privileges_tenant_contract.sql"]);
 });
 afterAll(async () => { await db?.drop(); });
 
-describe("upgrade 203 -> 217", () => {
+describe("upgrade 203 -> 221", () => {
   it("pre-upgrade events are untouched and the chain continues from them", async () => {
     const { rows } = await db.su.query("SELECT encode(row_hash,'hex') h FROM control.audit_events WHERE seq = $1", [preUpgradeHead.seq]);
     expect(rows[0].h).toBe(preUpgradeHead.hash);

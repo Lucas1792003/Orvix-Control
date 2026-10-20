@@ -6,7 +6,8 @@
 //                                    + sessions; --force needed for the LAST owner, which makes recovery impossible)
 //   npm run host -- purge-expired
 //   npm run host -- notify-add      --recipient host|identity [--email <operator>] --kind file|webhook --target <path|url>
-//                                    (webhook: a 32-byte HMAC secret is generated and printed ONCE for the receiver)
+//                                    (webhook: a 32-byte signing secret AND a separate 32-byte ack key are generated and
+//                                     printed ONCE for the receiver; the ack is verified in the database, C1.3)
 //   npm run host -- notify-disable  --id <channel id>
 //   npm run host -- notify-status
 //   npm run host -- approve-operator --email <e> --fingerprint <XXXX-XXXX-XXXX-XXXX shown to the invitee at enrolment>
@@ -55,10 +56,27 @@ async function main() {
   const client = new pg.Client(superuserConfig());
   await client.connect();
   try {
-    const r = (await client.query(spec[0], args)).rows[0].r;
-    if (!r.ok) throw new Error(`refused: ${r.error}`);
+    // notify-add for a webhook: the channel and its ack key are created in ONE transaction (never an enabled channel
+    // without its database-verified ack key)
+    await client.query("BEGIN");
+    let r: { ok: boolean; error?: string; channel_id?: number };
+    let ackKey: string | null = null;
+    try {
+      r = (await client.query(spec[0], args)).rows[0].r;
+      if (!r.ok) throw new Error(`refused: ${r.error}`);
+      if (generatedSecret && r.channel_id) {
+        ackKey = randomBytes(32).toString("hex");
+        const a = (await client.query("SELECT control.host_set_notify_ack_key($1, $2) AS r", [r.channel_id, ackKey])).rows[0].r;
+        if (!a.ok) throw new Error(`refused setting the ack key: ${a.error}`);
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    }
     console.log(JSON.stringify(r));
     if (generatedSecret) console.log(`webhook HMAC secret (shown once; configure it in the receiver): ${generatedSecret}`);
+    if (ackKey) console.log(`webhook ACK key (shown once; the receiver signs X-Orvix-Ack with it; the sentinel never sees it): ${ackKey}`);
   } finally {
     await client.end();
   }

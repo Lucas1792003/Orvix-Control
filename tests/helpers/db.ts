@@ -92,9 +92,9 @@ export async function deliverAll(db: TestDb): Promise<number> {
   let n = 0;
   try {
     for (;;) {
-      const { rows } = await sp.query("SELECT * FROM control.sentinel_claim(100)");
+      const { rows } = await sp.query("SELECT * FROM control.sentinel_claim(100, NULL)");
       if (rows.length === 0) break;
-      for (const r of rows) { await sp.query("SELECT control.sentinel_ack($1, $2, true, NULL)", [r.outbox_id, r.channel_id]); n++; }
+      for (const r of rows) { await sp.query("SELECT control.sentinel_ack($1, $2, $3, true, NULL)", [r.outbox_id, r.channel_id, r.claim_token]); n++; }
     }
   } finally {
     await sp.end();
