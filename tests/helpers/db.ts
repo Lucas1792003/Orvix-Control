@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import pg from "pg";
-import { appConfig, devDbTarget, loadDevEnv, ROOT, superuserConfig } from "../../scripts/env";
+import { appConfig, devDbTarget, loadDevEnv, ROOT, sentinelConfig, superuserConfig } from "../../scripts/env";
 import { migrate, setAppPassword } from "../../scripts/migrator";
 import { SoftAuthenticator } from "./softAuthenticator";
 
@@ -18,7 +18,7 @@ export type TestDb = {
 
 const B = (s: string) => Buffer.from(s, "base64url");
 
-export async function createTestDb(opts: { name?: string; seed?: boolean; upTo?: string } = {}): Promise<TestDb> {
+export async function createTestDb(opts: { name?: string; seed?: boolean; upTo?: string; notify?: boolean } = {}): Promise<TestDb> {
   loadDevEnv();
   devDbTarget();
   const name = opts.name ?? `orvix_control_test_${randomBytes(5).toString("hex")}`;
@@ -36,6 +36,10 @@ export async function createTestDb(opts: { name?: string; seed?: boolean; upTo?:
     for (const f of ["pos_mock.sql", "synthetic_tenants.sql"]) {
       await mig.query(readFileSync(path.join(ROOT, "db", "dev", f), "utf8"));
     }
+  }
+  // A host out-of-band channel, as an operator would configure (212). Without one, gated actions stay blocked.
+  if (opts.notify !== false && (await mig.query("SELECT to_regproc('control.host_add_notify_channel') IS NOT NULL AS x")).rows[0].x) {
+    await mig.query("SELECT control.host_add_notify_channel('host', NULL, 'file', '/dev/null', NULL)");
   }
   await mig.end();
 
@@ -81,18 +85,38 @@ export async function hostBootstrap(db: TestDb, email = "owner@example.invalid",
   return rows[0].r;
 }
 
-export async function enrolWithToken(db: TestDb, token: string, auth: SoftAuthenticator, nickname = "primary") {
+// Stands in for scripts/sentinel.ts: claims pending notices AS control_sentinel and acknowledges them delivered.
+export async function deliverAll(db: TestDb): Promise<number> {
+  if (!(await db.su.query("SELECT to_regproc('control.sentinel_claim') IS NOT NULL AS x")).rows[0].x) return 0;
+  const sp = new pg.Pool({ ...sentinelConfig(), database: db.name, max: 1 });
+  let n = 0;
+  try {
+    for (;;) {
+      const { rows } = await sp.query("SELECT * FROM control.sentinel_claim(100)");
+      if (rows.length === 0) break;
+      for (const r of rows) { await sp.query("SELECT control.sentinel_ack($1, $2, true, NULL)", [r.outbox_id, r.channel_id]); n++; }
+    }
+  } finally {
+    await sp.end();
+  }
+  return n;
+}
+
+export async function enrolWithToken(db: TestDb, token: string, auth: SoftAuthenticator, nickname = "primary",
+                                     opts: { deliver?: boolean } = {}) {
+  if (opts.deliver !== false) await deliverAll(db);
   const b = await db.api("api_enrol_begin", token);
   if (!b.ok) return b;
   const reg = auth.register({ challenge: b.challenge, user: { id: Buffer.from(b.identity_id).toString("base64url") } });
   return db.api("api_enrol_complete", token, B(reg.response.attestationObject), B(reg.response.clientDataJSON), nickname);
 }
 
-export async function login(db: TestDb, auth: SoftAuthenticator, opts: Parameters<SoftAuthenticator["assert"]>[1] = {}) {
-  const b = await db.api("api_login_begin");
+export async function login(db: TestDb, auth: SoftAuthenticator, opts: Parameters<SoftAuthenticator["assert"]>[1] = {},
+                            deviceToken: string | null = null) {
+  const b = await db.api("api_login_begin", deviceToken);
   if (!b.ok) return b;
   const a = assertionParts(auth.assert({ challenge: b.challenge }, opts));
-  return db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig);
+  return db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig, deviceToken);
 }
 
 export async function loginToken(db: TestDb, auth: SoftAuthenticator): Promise<string> {
@@ -138,7 +162,7 @@ export async function operatorFixture(db: TestDb, role: "admin" | "owner", email
     `INSERT INTO control.platform_identities (email, display_name, role, state, activated_at)
      VALUES ($1, $2, $3, 'active', now()) RETURNING id`, [email, `Test ${role} ${email.split("@")[0]}`, role]);
   await db.su.query(
-    `INSERT INTO control.webauthn_credentials (identity_id, credential_id, public_key, created_via) VALUES ($1, $2, $3, 'added')`,
+    `INSERT INTO control.webauthn_credentials (identity_id, credential_id, public_key, created_via) VALUES ($1, $2, $3, 'bootstrap')`,
     [rows[0].id, auth.id, auth.cosePublicKey]);
   return { identityId: rows[0].id, auth, token: await loginToken(db, auth) };
 }
@@ -185,5 +209,12 @@ export async function recomputeChainAsSuperuser(db: TestDb, editSql?: string) {
 
 // New in-session passkeys are pending for 15 minutes (207). Tests that need them immediately end the wait.
 export async function activatePending(db: TestDb) {
+  await deliverAll(db);
   await db.su.query("UPDATE control.webauthn_credentials SET usable_after = now() WHERE usable_after > now()");
+  await backdateDeliveries(db);
+}
+
+// The reaction window for an added passkey counts from DELIVERY of its notice (217): tests end it by backdating.
+export async function backdateDeliveries(db: TestDb) {
+  await db.su.query("UPDATE control.notify_deliveries SET delivered_at = delivered_at - interval '1 day' WHERE delivered_at > now() - interval '1 day'");
 }

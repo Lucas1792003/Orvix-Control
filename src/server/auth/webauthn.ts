@@ -152,14 +152,15 @@ async function completeAssertion(purpose: "login" | "stepup" | "anchor", respons
     Buffer.from(response.response.signature, "base64url"), ...trailing]);
 }
 
-export async function loginOptions(): Promise<ApiResult> {
-  const r = await callApi("api_login_begin", []);
+// deviceToken: opaque rate-limit scope from a previous sign-in on this browser (213); no authentication power.
+export async function loginOptions(deviceToken: string | null): Promise<ApiResult> {
+  const r = await callApi("api_login_begin", [deviceToken]);
   if (!r.ok) return r;
   return { ok: true, options: await assertionOptions(String(r.challenge)) };
 }
 
-export async function loginVerify(response: AuthenticationResponseJSON): Promise<ApiResult> {
-  const r = await completeAssertion("login", response, "api_login_complete", []);
+export async function loginVerify(response: AuthenticationResponseJSON, deviceToken: string | null): Promise<ApiResult> {
+  const r = await completeAssertion("login", response, "api_login_complete", [], [deviceToken]);
   return r.ok ? r : { ok: false, error: r.error === "RATE_LIMITED" ? "RATE_LIMITED" : "LOGIN_FAILED" };
 }
 

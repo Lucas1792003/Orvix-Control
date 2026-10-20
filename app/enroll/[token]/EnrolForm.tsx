@@ -6,6 +6,7 @@ import { postJson } from "@/src/ui/http";
 export function EnrolForm({ token }: { token: string }) {
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">(token ? "idle" : "error");
   const [account, setAccount] = useState<string | null>(null);
+  const [done, setDone] = useState<{ fingerprint?: string; awaitingHostApproval?: boolean } | null>(null);
 
   async function register() {
     setState("busy");
@@ -13,16 +14,25 @@ export function EnrolForm({ token }: { token: string }) {
       const o = await postJson("/api/auth/enroll/options", { token });
       if (!o.ok) throw new Error();
       const user = (o.options as { user?: { name?: string } }).user;
-      setAccount(`${user?.name ?? "unknown"}${o.purpose === "recovery" ? " (recovery: all previous passkeys will be disabled)" : ""}`);
+      setAccount(`${user?.name ?? "unknown"}${o.purpose === "recovery" ? " (recovery: all previous passkeys will be disabled)" : ""}${o.purpose === "invite" ? " (invitation: the host must approve before you can sign in)" : ""}`);
       const response = await startRegistration({ optionsJSON: o.options as never });
       const v = await postJson("/api/auth/enroll/verify", { token, response });
       if (!v.ok) throw new Error();
+      setDone({ fingerprint: v.fingerprint as string, awaitingHostApproval: v.awaitingHostApproval === true });
       setState("done");
     } catch {
       setState("error");
     }
   }
 
+  if (state === "done" && done?.awaitingHostApproval) {
+    return (
+      <p className="mt-6 text-sm">
+        Passkey registered. Read this fingerprint to the host, who activates your account:{" "}
+        <span className="font-mono text-base font-semibold">{done.fingerprint}</span>
+      </p>
+    );
+  }
   if (state === "done") {
     return (
       <p className="mt-6 text-sm">

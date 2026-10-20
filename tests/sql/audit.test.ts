@@ -62,7 +62,7 @@ describe("append-only enforcement", () => {
     const challenges: string[] = [];
     while (challenges.length < 40) {
       await db.su.query("DELETE FROM control.rate_limits");
-      for (let i = 0; i < 15 && challenges.length < 40; i++) challenges.push((await db.api("api_login_begin")).challenge);
+      for (let i = 0; i < 15 && challenges.length < 40; i++) challenges.push((await db.api("api_login_begin", null)).challenge);
     }
     await db.su.query("DELETE FROM control.rate_limits");
     const before = Number((await db.su.query("SELECT max(seq) m FROM control.audit_events")).rows[0].m);

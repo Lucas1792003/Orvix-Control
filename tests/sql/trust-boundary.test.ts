@@ -12,7 +12,7 @@ let owner: Operator;
 const sessions = async () => Number((await db.su.query("SELECT count(*) n FROM control.sessions")).rows[0].n);
 const grants = async () => Number((await db.su.query("SELECT count(*) n FROM control.stepup_grants")).rows[0].n);
 const counter = async () => Number((await db.su.query("SELECT sign_count FROM control.webauthn_credentials WHERE credential_id = $1", [owner.auth.id])).rows[0].sign_count);
-const loginWith = (a: { id: string; cdj: Buffer; ad: Buffer; sig: Buffer }) => db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig);
+const loginWith = (a: { id: string; cdj: Buffer; ad: Buffer; sig: Buffer }) => db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig, null);
 
 beforeAll(async () => { db = await createTestDb({ seed: true }); owner = await ownerWithSession(db); });
 afterAll(async () => { await db?.drop(); });
@@ -26,7 +26,7 @@ describe("forged session creation (as control_app)", () => {
 
   it("random signature bytes over a real DB challenge are refused", async () => {
     const before = await sessions();
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const a = assertionParts(owner.auth.assert({ challenge: b.challenge }));
     expect((await loginWith({ ...a, sig: randomBytes(70) })).error).toBe("SIGNATURE_INVALID");
     expect(await sessions()).toBe(before);
@@ -35,7 +35,7 @@ describe("forged session creation (as control_app)", () => {
   it("a validly formed assertion signed by the ATTACKER's key under the owner's credential id is refused", async () => {
     const before = await sessions();
     const attacker = new SoftAuthenticator();
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const a = assertionParts(attacker.assert({ challenge: b.challenge }));
     expect((await loginWith({ ...a, id: owner.auth.id })).error).toBe("SIGNATURE_INVALID");
     expect(await sessions()).toBe(before);
@@ -47,11 +47,11 @@ describe("forged session creation (as control_app)", () => {
   });
 
   it("altering clientDataJSON or authenticatorData after signing breaks the signature", async () => {
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const a = assertionParts(owner.auth.assert({ challenge: b.challenge }));
     const cd = JSON.parse(a.cdj.toString()); cd.extra = 1;
     expect((await loginWith({ ...a, cdj: Buffer.from(JSON.stringify(cd)) })).error).toBe("SIGNATURE_INVALID");
-    const b2 = await db.api("api_login_begin");
+    const b2 = await db.api("api_login_begin", null);
     const a2 = assertionParts(owner.auth.assert({ challenge: b2.challenge }));
     const ad = Buffer.from(a2.ad); ad.writeUInt32BE(999_999, 33); // bump the counter without re-signing
     expect((await loginWith({ ...a2, ad })).error).toBe("SIGNATURE_INVALID");
@@ -59,7 +59,7 @@ describe("forged session creation (as control_app)", () => {
 
   it("a forged assertion cannot move the signature counter (no DoS by counter poisoning)", async () => {
     const c0 = await counter();
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const a = assertionParts(new SoftAuthenticator().assert({ challenge: b.challenge }, { counter: 4_000_000_000 }));
     await loginWith({ ...a, id: owner.auth.id });
     expect(await counter()).toBe(c0);
@@ -70,26 +70,26 @@ describe("forged session creation (as control_app)", () => {
   it("signed evidence with UV off, a foreign origin, a foreign RP ID or the wrong ceremony type is refused", async () => {
     for (const [opts, code] of [[{ uv: false }, "USER_NOT_VERIFIED"], [{ origin: "https://evil.example" }, "BAD_CLIENT_DATA"],
                                 [{ rpId: "evil.example" }, "RP_ID_MISMATCH"], [{ type: "webauthn.create" }, "BAD_CLIENT_DATA"]] as const) {
-      const b = await db.api("api_login_begin");
+      const b = await db.api("api_login_begin", null);
       expect((await loginWith(assertionParts(owner.auth.assert({ challenge: b.challenge }, opts)))).error, JSON.stringify(opts)).toBe(code);
     }
   });
 
   it("garbage evidence of every shape fails closed", async () => {
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const cases: [unknown, unknown, unknown][] = [
       [null, null, null], [Buffer.alloc(0), Buffer.alloc(0), Buffer.alloc(0)], [Buffer.from("{"), Buffer.alloc(37), Buffer.alloc(8)],
       [Buffer.from(JSON.stringify({ type: "webauthn.get", origin: "http://localhost:3410", challenge: b.challenge })), Buffer.alloc(5000), Buffer.alloc(70)],
     ];
     for (const [cdj, ad, sig] of cases) {
-      const r = await db.api("api_login_complete", owner.auth.id, cdj, ad, sig);
+      const r = await db.api("api_login_complete", owner.auth.id, cdj, ad, sig, null);
       expect(r.ok).toBe(false);
     }
   });
 
   it("an ECDSA signature by a key that is not on file is refused even with a perfect envelope", async () => {
     const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const a = assertionParts(owner.auth.assert({ challenge: b.challenge }));
     const sig = createSign("SHA256").update(Buffer.concat([a.ad, (await import("node:crypto")).createHash("sha256").update(a.cdj).digest()])).sign(privateKey);
     expect((await loginWith({ ...a, sig })).error).toBe("SIGNATURE_INVALID");
@@ -247,17 +247,14 @@ describe("privilege boundaries between control roles", () => {
 });
 
 describe("availability: control_app cannot block audited actions with advisory locks", () => {
-  it("an app connection holding the old audit advisory lock does not stop logins or audit writes", async () => {
-    const holder = await db.app.connect();
-    try {
-      await holder.query("SELECT pg_advisory_lock(201, 1), pg_advisory_lock(202, 1)");
-      expect((await db.api("api_audit_list", owner.token, 1, null)).ok).toBe(true);
-      expect((await db.api("api_login_begin")).ok).toBe(true);
-      await db.api("api_auth_failed", "login", (await db.api("api_login_begin")).challenge, "x", "TEST");
-    } finally {
-      await holder.query("SELECT pg_advisory_unlock_all()");
-      holder.release();
+  it("control_app cannot take advisory locks at all (session locks would outlive the watchdog's transaction checks) (217)", async () => {
+    for (const sql of ["SELECT pg_advisory_lock(201, 1)", "SELECT pg_try_advisory_lock(1)", "SELECT pg_advisory_lock_shared(1)",
+                       "SELECT pg_advisory_xact_lock(202, 1)", "SELECT pg_advisory_unlock_all()"]) {
+      const err = await db.app.query(sql).catch((e) => e);
+      expect(err.code, sql).toBe("42501");
     }
+    expect((await db.api("api_audit_list", owner.token, 1, null)).ok).toBe(true);
+    expect((await db.api("api_login_begin", null)).ok).toBe(true);
   });
 
   it("control_app cannot create large objects", async () => {
@@ -271,7 +268,7 @@ describe("failure auditing (review F3/M-3, round 2)", () => {
     const before = Number((await db.su.query("SELECT max(seq) m FROM control.audit_events")).rows[0].m);
     await db.su.query("DELETE FROM control.rate_limits");
     for (let i = 0; i < 70; i++) {
-      await db.api("api_login_complete", owner.auth.id + (i % 2 ? "" : "x"), Buffer.from("{}"), Buffer.alloc(37), Buffer.alloc(8));
+      await db.api("api_login_complete", owner.auth.id + (i % 2 ? "" : "x"), Buffer.from("{}"), Buffer.alloc(37), Buffer.alloc(8), null);
       if (i % 4 === 3) await db.su.query("DELETE FROM control.rate_limits WHERE bucket = 'login_credential'");
     }
     const { rows } = await db.su.query("SELECT actor_type, action FROM control.audit_events WHERE seq > $1", [before]);

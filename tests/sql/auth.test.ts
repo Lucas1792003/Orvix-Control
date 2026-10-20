@@ -68,7 +68,7 @@ describe("enrolment by token", () => {
   });
 
   it("refuses a login challenge used for registration, a wrong origin, a wrong RP ID and missing UV", async () => {
-    const lb = await db.api("api_login_begin");
+    const lb = await db.api("api_login_begin", null);
     const auth = new SoftAuthenticator();
     const reg = auth.register({ challenge: lb.challenge, user: { id: "eA" } });
     expect((await db.api("api_enrol_complete", token, Buffer.from(reg.response.attestationObject, "base64url"),
@@ -128,29 +128,29 @@ describe("login", () => {
   });
 
   it("the database generates challenges (32 random bytes, base64url)", async () => {
-    const a = await db.api("api_login_begin");
-    const b = await db.api("api_login_begin");
+    const a = await db.api("api_login_begin", null);
+    const b = await db.api("api_login_begin", null);
     expect(a.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(a.challenge).not.toBe(b.challenge);
   });
 
   it("a signed assertion is single-use (replay refused, audited)", async () => {
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     const a = assertionParts(owner.auth.assert({ challenge: b.challenge }));
-    expect((await db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig)).ok).toBe(true);
-    expect(await db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig)).toEqual({ ok: false, error: "INVALID_CHALLENGE" });
+    expect((await db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig, null)).ok).toBe(true);
+    expect(await db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig, null)).toEqual({ ok: false, error: "INVALID_CHALLENGE" });
     const [e] = await lastAudit(db);
     expect([e.action, e.outcome, e.reason_code]).toEqual(["platform.login_failed", "denied", "INVALID_CHALLENGE"]);
   });
 
   it("refuses an expired challenge and a challenge issued for another purpose", async () => {
-    const b = await db.api("api_login_begin");
+    const b = await db.api("api_login_begin", null);
     await db.su.query("UPDATE control.webauthn_challenges SET expires_at = now() - interval '1 second' WHERE challenge_hash = sha256(convert_to($1,'UTF8'))", [b.challenge]);
     const a = assertionParts(owner.auth.assert({ challenge: b.challenge }));
-    expect((await db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig)).error).toBe("INVALID_CHALLENGE");
+    expect((await db.api("api_login_complete", a.id, a.cdj, a.ad, a.sig, null)).error).toBe("INVALID_CHALLENGE");
     const s = await db.api("api_stepup_begin", owner.token, "credential_add", owner.identityId);
     const a2 = assertionParts(owner.auth.assert({ challenge: s.challenge }));
-    expect((await db.api("api_login_complete", a2.id, a2.cdj, a2.ad, a2.sig)).error).toBe("INVALID_CHALLENGE");
+    expect((await db.api("api_login_complete", a2.id, a2.cdj, a2.ad, a2.sig, null)).error).toBe("INVALID_CHALLENGE");
   });
 
   it("a validly signed but stale counter is refused and FLAGGED, never auto-disabled (no last-passkey lockout)", async () => {
@@ -181,7 +181,7 @@ describe("login", () => {
 
   it("global login rate limit applies to challenge issuance (audited)", async () => {
     const out: boolean[] = [];
-    for (let i = 0; i < 21; i++) out.push((await db.api("api_login_begin")).ok);
+    for (let i = 0; i < 21; i++) out.push((await db.api("api_login_begin", null)).ok);
     expect(out.filter(Boolean)).toHaveLength(20);
     expect(out[20]).toBe(false);
     const [e] = await lastAudit(db);

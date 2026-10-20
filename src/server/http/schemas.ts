@@ -31,8 +31,14 @@ export const transitionBody = z.object({
 });
 
 export const stepupBody = z.object({
-  action: z.enum(["tenant_transition", "credential_add", "credential_revoke", "recovery_approve", "recovery_cancel"]),
+  action: z.enum(["tenant_transition", "credential_add", "credential_revoke", "recovery_approve", "recovery_cancel", "operator_invite"]),
   target: z.string().regex(/^[A-Za-z0-9:_-]{1,200}$/),
 });
 
 export const nickname = z.string().trim().min(1).max(60).nullable().default(null);
+
+export const inviteBody = z.object({
+  email: z.string().trim().toLowerCase().max(254).regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/),
+  displayName: z.string().trim().min(1).max(80),
+  role: z.enum(["owner", "admin"]),
+});

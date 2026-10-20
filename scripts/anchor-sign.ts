@@ -6,7 +6,7 @@
 import { createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { anchorV2Message, ed25519Fingerprint, loadArchive, parseStrict, verifyAnchorV2, verifyChain, type AnchorV2, type ExportedEvent } from "./verify-audit";
+import { anchorV2Message, ed25519Fingerprint, loadArchive, parseStrict, safe, verifyAnchorV2, verifyChain, type AnchorV2, type ExportedEvent } from "./verify-audit";
 
 export function signAnchor(events: ExportedEvent[], archive: AnchorV2[], keyPem: string, signedAt = new Date().toISOString()):
   { ok: true; anchor: AnchorV2 } | { ok: false; reason: string } {
@@ -35,21 +35,17 @@ export function signAnchor(events: ExportedEvent[], archive: AnchorV2[], keyPem:
 // What the owner is about to vouch for: everything after the newest archived anchor (final review, audit M1).
 // A compromised server can rewrite or drop UNANCHORED events before they are exported; the signer cannot detect
 // that, so the owner must read this summary and confirm the head explicitly.
-// Anything the server controls is printed escaped: no control characters, ANSI sequences or bidi overrides can
-// hide or rewrite summary lines on the owner's terminal (final review, audit NEW-1).
-export function safe(v: unknown): string {
-  return JSON.stringify(String(v ?? "")).slice(1, -1).replace(/[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
-    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
-}
+// Anything the server controls is printed escaped (shared printable-ASCII escaping, final review + 211 review).
+export { safe } from "./verify-audit";
 
 export function summarizeTail(events: ExportedEvent[], archive: AnchorV2[]) {
   const from = archive.length ? Math.max(...archive.map((a) => a.seq)) + 1 : 0;
   const tail = [...events].filter((e) => e.seq >= from).sort((a, b) => a.seq - b.seq);
-  const sensitive = tail.filter((e) => e.outcome !== "success" || /credential|recovery|stepup|owner|operator|anchor|bootstrap|suppressed/.test(e.action));
+  const sensitive = tail.filter((e) => e.outcome !== "success" || /credential|recovery|stepup|owner|operator|anchor|bootstrap|suppressed|watchdog|notify/.test(String(e.action)));
   const counts: Record<string, number> = {};
   for (const e of tail) counts[safe(e.action)] = (counts[safe(e.action)] ?? 0) + 1;
   return {
-    from, to: tail.at(-1)?.seq ?? from - 1, count: tail.length, counts,
+    from, to: tail.at(-1)?.seq ?? from - 1, head: String(tail.at(-1)?.row_hash ?? "").slice(0, 12), count: tail.length, counts,
     firstAt: tail[0] ? new Date(tail[0].occurred_at_us / 1000).toISOString() : null,
     lastAt: tail.at(-1) ? new Date(tail.at(-1)!.occurred_at_us / 1000).toISOString() : null,
     sensitive: sensitive.map((e) => `#${e.seq} ${safe(e.action)} ${safe(e.outcome)}${e.reason_code ? " " + safe(e.reason_code) : ""} by ${safe(e.actor_label ?? e.actor_type)}`),
@@ -65,7 +61,7 @@ if (process.argv[1]?.endsWith("anchor-sign.ts")) {
   try {
     const eventsFile = arg("events"); const dir = arg("archive"); const keyFile = arg("key"); const confirm = arg("confirm-head");
     if (!eventsFile || !dir || !keyFile) {
-      console.error("usage: npx tsx scripts/anchor-sign.ts --events events.json --archive <dir> --key anchor-key.pem [--init] [--confirm-head <seq>]");
+      console.error("usage: npx tsx scripts/anchor-sign.ts --events events.json --archive <dir> --key anchor-key.pem [--init] [--confirm-head <seq>:<hash prefix>]");
       process.exit(2);
     }
     const exported = parseStrict(readFileSync(eventsFile, "utf8")) as Record<string, any>;
@@ -79,15 +75,16 @@ if (process.argv[1]?.endsWith("anchor-sign.ts")) {
       process.exit(3);
     }
     const sum = summarizeTail(events, archive);
-    console.log(`events since the newest anchor: #${sum.from}..#${sum.to} (${sum.count}), ${sum.firstAt ?? "-"} .. ${sum.lastAt ?? "-"}`);
+    console.log(`events since the newest anchor: #${sum.from}..#${sum.to} (${sum.count}), ${sum.firstAt ?? "-"} .. ${sum.lastAt ?? "-"}; head ${safe(sum.head)}`);
     for (const [k, n] of Object.entries(sum.counts).sort()) console.log(`  ${String(n).padStart(5)}  ${k}`);
     if (sum.sensitive.length) { console.log("sensitive events in this range:"); for (const l of sum.sensitive) console.log(`  ${l}`); }
-    if (confirm === undefined || Number(confirm) !== sum.to) {
-      console.error(`NOT SIGNED: review the summary above against what you know happened, then re-run with --confirm-head ${sum.to}`);
+    // binds the reviewed head: sequence number AND hash prefix (an export swapped between runs is not signed)
+    if (confirm === undefined || confirm !== `${sum.to}:${sum.head}`) {
+      console.error(`NOT SIGNED: review the summary above against what you know happened, then re-run with --confirm-head ${sum.to}:${safe(sum.head)}`);
       process.exit(3);
     }
     const r = signAnchor(events, archive, keyPem);
-    if (!r.ok) { console.error(`REFUSED: ${r.reason}`); process.exit(1); }
+    if (!r.ok) { console.error(`REFUSED: ${safe(r.reason)}`); process.exit(1); }
     const out = path.join(dir, `anchor-v2-seq${String(r.anchor.seq).padStart(9, "0")}.json`);
     writeFileSync(out, JSON.stringify(r.anchor, null, 2), { flag: "wx" });
     console.log(`signed seq ${r.anchor.seq} (${r.anchor.head_hash.slice(0, 16)}); wrote ${out}. Keep the archive off the server.`);

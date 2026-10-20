@@ -7,7 +7,7 @@ export default async function EnrolPage({ params }: { params: Promise<{ token: s
       <p className="text-xs font-medium uppercase tracking-widest text-muted">Orvix Control</p>
       <h1 className="mt-2 text-2xl font-semibold">Register your passkey</h1>
       <p className="mt-2 text-sm text-muted">
-        This one-time link works once and expires (15 minutes for a first owner, 30 minutes for a recovery link). A recovery enrolment disables all of the account&apos;s previous passkeys. After registering, sign in.
+        This one-time link works once and expires (15 minutes for a first owner, 30 minutes for a recovery link, 48 hours for an invitation). A recovery enrolment disables all of the account&apos;s previous passkeys. An invited operator cannot sign in until the host approves the passkey fingerprint shown after registering; everyone else can sign in straight away.
       </p>
       <EnrolForm token={/^[0-9a-f]{64}$/.test(token) ? token : ""} />
     </main>

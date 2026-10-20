@@ -12,5 +12,6 @@ export async function POST(req: NextRequest) {
   const nick = nickname.safeParse(body?.nickname ?? null);
   if (!token.success || !resp.success || !nick.success) return fail("INVALID_INPUT");
   const r = await enrolVerify(token.data, resp.data as unknown as RegistrationResponseJSON, nick.data);
-  return r.ok ? json({ ok: true }) : fail("ENROLMENT_FAILED");
+  if (r.ok) return json({ ok: true, purpose: r.purpose, fingerprint: r.fingerprint, awaitingHostApproval: r.awaiting_host_approval === true });
+  return fail(r.error === "NOTIFICATION_PENDING" ? "NOTIFICATION_PENDING" : "ENROLMENT_FAILED");
 }

@@ -7,6 +7,13 @@ import { callApi } from "../db/api";
 // __Host- prefix: Secure, Path=/, no Domain. Chrome and Firefox treat http://localhost as a secure
 // context; Safari's handling is unverified (docs/SECURITY_FINDINGS.md).
 export const SESSION_COOKIE = "__Host-orvix_sid";
+// Device cookie (213): selects a per-device login rate-limit bucket. Grants nothing by itself.
+export const DEVICE_COOKIE = "__Host-orvix_dev";
+
+export async function readDeviceToken(): Promise<string | null> {
+  const v = (await cookies()).get(DEVICE_COOKIE)?.value;
+  return v && TOKEN_RE.test(v) ? v : null;
+}
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 
 export type Session = {

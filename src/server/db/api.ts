@@ -5,7 +5,8 @@ import { config } from "../config";
 // The ONLY database access path in the app: control_app calling control.api_* functions.
 // No table is ever queried directly; control_app has no table privileges anyway.
 
-const globalForPool = globalThis as unknown as { __orvixPool?: pg.Pool; __orvixContractChecked?: boolean };
+const globalForPool = globalThis as unknown as { __orvixPool?: pg.Pool; __orvixContractCheckedAt?: number };
+const RECHECK_MS = 30_000;
 
 function pool(): pg.Pool {
   if (!globalForPool.__orvixPool) {
@@ -26,9 +27,9 @@ const API = {
   api_contract_version: 0,
   api_enrol_begin: 1,
   api_enrol_complete: 4,
-  api_login_begin: 0,
+  api_login_begin: 1,
   api_credential_lookup: 1,
-  api_login_complete: 4,
+  api_login_complete: 5,
   api_auth_failed: 4,
   api_session_get: 1,
   api_session_revoke: 1,
@@ -41,6 +42,9 @@ const API = {
   api_recovery_list: 1,
   api_recovery_approve: 2,
   api_recovery_cancel: 2,
+  api_operator_invite: 4,
+  api_operator_invite_revoke: 2,
+  api_operator_list: 1,
   api_tenant_list: 1,
   api_tenant_get: 2,
   api_tenant_transition: 6,
@@ -57,9 +61,9 @@ export type ApiName = keyof typeof API;
 export type ApiResult = { ok: true; [k: string]: unknown } | { ok: false; error: string };
 
 async function ensureContract(): Promise<void> {
-  if (globalForPool.__orvixContractChecked) return;
+  if (globalForPool.__orvixContractCheckedAt && Date.now() - globalForPool.__orvixContractCheckedAt < RECHECK_MS) return;
   // Startup integrity checks (fail closed): expected contract and cluster; every SECURITY DEFINER function in
-  // `control` still pins search_path; this role's defaults have not been altered.
+  // `control` still pins search_path; this role's defaults have not been altered; no prepared transactions.
   const { rows } = await pool().query(`
     SELECT control.api_contract_version() AS v, current_setting('cluster_name') AS cluster,
            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -70,16 +74,21 @@ async function ensureContract(): Promise<void> {
              WHERE r.rolname = current_user AND s.setdatabase <> 0)::int AS per_db,
            current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt,
            current_setting('idle_in_transaction_session_timeout') AS it, current_setting('temp_file_limit') AS tfl,
+           current_setting('transaction_timeout') AS tt, current_setting('max_prepared_transactions') AS mpt,
            current_setting('default_transaction_read_only') AS ro, current_setting('row_security') AS rs`);
   const cfg: string[] = rows[0]?.rolconfig ?? [];
-  const expected = ["statement_timeout=5s", "idle_in_transaction_session_timeout=10s", "lock_timeout=3s", "temp_file_limit=256MB"];
+  // the role's defaults must be EXACTLY this set (no extra or replaced entries)
+  const expected = ["search_path=control, pg_catalog", "statement_timeout=5s", "idle_in_transaction_session_timeout=10s",
+                    "lock_timeout=3s", "temp_file_limit=256MB", "transaction_timeout=10s"].sort();
   const r0 = rows[0] ?? {};
   if (r0.v !== config.contractVersion || r0.cluster !== "orvix-control-dev" || r0.unpinned !== 0
-      || !expected.every((e) => cfg.includes(e)) || cfg.length !== expected.length + 1 || r0.per_db !== 0
-      || r0.st !== "5s" || r0.lt !== "3s" || r0.it !== "10s" || r0.tfl !== "256MB" || r0.ro !== "off" || r0.rs !== "on") {
+      || JSON.stringify([...cfg].sort()) !== JSON.stringify(expected) || r0.per_db !== 0
+      || r0.lt !== "3s" || r0.it !== "10s" || r0.tfl !== "256MB" || r0.tt !== "10s" || r0.ro !== "off" || r0.rs !== "on"
+      // prepared transactions would survive the watchdog and hold locks forever
+      || r0.mpt !== "0") {
     throw new Error("CONTRACT_MISMATCH");
   }
-  globalForPool.__orvixContractChecked = true;
+  globalForPool.__orvixContractCheckedAt = Date.now();   // re-checked every 30 s (fail closed on drift)
 }
 
 export async function callApi(name: ApiName, args: unknown[]): Promise<ApiResult> {

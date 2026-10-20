@@ -10,6 +10,29 @@ export function loadDevEnv(): void {
     throw new Error(".env.local missing: run `npm run db:up` first");
   }
   process.loadEnvFile(file);
+  // Host-side secrets live in separate files that the Next.js server never loads (it auto-loads only .env.local):
+  // .env.host (database superuser: migrations, host CLI, tests) and .env.sentinel (out-of-band notifier/watchdog).
+  for (const extra of [".env.host", ".env.sentinel"]) {
+    const f = path.join(ROOT, extra);
+    if (existsSync(f)) process.loadEnvFile(f);
+  }
+}
+
+// The sentinel process gets the database target and ITS OWN credential only: never the superuser or app password.
+export function loadSentinelEnv(): void {
+  const file = path.join(ROOT, ".env.local");
+  if (!existsSync(file)) throw new Error(".env.local missing: run `npm run db:up` first");
+  process.loadEnvFile(file);
+  for (const k of Object.keys(process.env)) {
+    if (/SUPERUSER|APP_PASSWORD|SESSION_SECRET/.test(k)) delete process.env[k];
+  }
+  const f = path.join(ROOT, ".env.sentinel");
+  if (!existsSync(f)) throw new Error(".env.sentinel missing: run `npm run db:up` first");
+  process.loadEnvFile(f);
+}
+
+export function sentinelConfig() {
+  return { ...devDbTarget(), user: "control_sentinel", password: need("ORVIX_DB_SENTINEL_PASSWORD") };
 }
 
 function need(name: string): string {

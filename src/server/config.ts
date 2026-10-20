@@ -20,7 +20,7 @@ export const config = (() => {
     throw new Error("orvix-control: the server must connect as control_app only");
   }
   for (const k of Object.keys(process.env)) {
-    if (/SERVICE_ROLE|SUPABASE/i.test(k)) {
+    if (/SERVICE_ROLE|SUPABASE|SENTINEL|SUPERUSER/i.test(k)) {
       throw new Error(`orvix-control: refusing to run with ${k} in the environment`);
     }
   }
@@ -34,6 +34,6 @@ export const config = (() => {
     rpID,
     rpName: "Orvix Control (dev)",
     origin,
-    contractVersion: "orvix-control/0.3",
+    contractVersion: "orvix-control/0.4",
   } as const;
 })();

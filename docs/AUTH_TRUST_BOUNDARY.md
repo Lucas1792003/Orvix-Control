@@ -1,4 +1,4 @@
-# Authentication trust boundary (Phase C1.1, migrations 204–211)
+# Authentication trust boundary (Phases C1.1–C1.2, migrations 204–217)
 
 ## 1. What `control_app` could do before (≤ 203)
 
@@ -23,7 +23,7 @@ The Next.js server connects as `control_app`, whose only rights are EXECUTE on `
 | A3 | Bootstrap | **Closed.** `host_bootstrap_owner` has no grant to any login role; only the database superuser (host) can call it. |
 | A4 | Disable a passkey by counter poisoning | **Closed** (205, 207, 210). The counter is parsed from signed authenticatorData, so a forged assertion never reaches the counter check. A genuine assertion that was held back and replayed out of order is refused and the passkey is **flagged**. It is never disabled automatically, because that could remove an operator's last passkey (review F1/R-M1). Since 210 the app's `@simplewebauthn` pre-check ignores the counter, so this evidence actually reaches the database (an e2e test covers it). |
 | A5 | Burn challenges and add failure rows | **Reduced** (207). A row is written only for a challenge that existed, is attributed to `anonymous` (the claimed credential is kept in `detail`), and is rate-limited. |
-| A6 | **Relay a live operator's ceremony** | **Remains (inherent) — MEDIUM.** A compromised app server or XSS sits between the operator's browser and the database. Authenticators do not display challenges, so **any** prompt the operator answers can be used for **any** step-up action of the attacker's choosing (not just "the same type"). Examples: `credential_add` followed by an attestation the attacker forges (format `none` is unsigned), or `recovery_approve`, whose enrolment link the server then holds. Mitigations (207): grants are single-use, bound to a target and valid for 2 min; passkeys added in-session stay **pending for 15 minutes** (they cannot sign in or step up, are shown to every session with a banner, and can be revoked); a recovery approval for a subject who objected, used a passkey or was emergency-revoked needs a later host confirmation plus a 12 h delay; every step is audited. Not mitigated: an operator who does not look at the banner during the window. A server-rendered confirmation outside this origin, or out-of-band notification, would be needed (future work). |
+| A6 | **Relay a live operator's ceremony** | **Remains (inherent) — MEDIUM.** A compromised app server or XSS sits between the operator's browser and the database. Authenticators do not display challenges, so **any** prompt the operator answers can be used for **any** step-up action of the attacker's choosing (not just "the same type"). Examples: `credential_add` followed by an attestation the attacker forges (format `none` is unsigned), or `recovery_approve`, whose enrolment link the server then holds. Mitigations (207): grants are single-use, bound to a target and valid for 2 min; passkeys added in-session stay **pending for 15 minutes** (they cannot sign in or step up, are shown to every session with a banner, and can be revoked); a recovery approval for a subject who objected, used a passkey or was emergency-revoked needs a later host confirmation plus a 12 h delay; every step is audited. Not mitigated in C1.1: an operator who does not look at the banner during the window. **C1.2 (212–217):** independent out-of-band notices with delivery gating — the pending window now starts only when the notice has been delivered (ack-verified) to every recipient including a host channel; recovery redemption and operator activation are gated the same way; new-device sign-ins are announced. The capability itself remains (inherent); see [RESIDUAL_RISKS_C1_2.md](RESIDUAL_RISKS_C1_2.md). |
 
 ## 3. Separation of duties
 
@@ -35,22 +35,26 @@ The Next.js server connects as `control_app`, whose only rights are EXECUTE on `
 | `control_definer` (NOLOGIN, owner) | tenant model, request results | tenant API (the audit-read API moved to `control_audit_owner` in 210) | read any auth table; change settings; it may only call `session_resolve()` and `stepup_consume_token()` (which needs the session **token**, not a context it could forge) |
 | `control_audit_owner` (NOLOGIN, owner) | audit events, anchors, the audit lock row, the audit read/export API | append; verify; store passkey anchors after re-verifying the signature (NULL-safe), with the signer's key obtained from the `control_auth` function `anchor_signer` | anything else. Since 210, no runtime role holds a privilege on another runtime role's table, and no RLS policy exists: a table owner can no longer run policy code as the reader. |
 | `control_schema_owner` (NOLOGIN, inert) | schema `control`; the shared invoker-rights helpers (crypto, `sha`, `new_secret`, `err`, base64url, canonical form) | nothing at runtime: it owns no SECURITY DEFINER function, so no code ever runs as it | — |
-| Superuser (host) | everything | bootstrap; recovery requests; tamper (detectable offline against signed anchors) | — (infrastructure trust) |
+| `control_sentinel` (LOGIN, C1.2) | its own password (`.env.sentinel`); reads webhook secrets through `sentinel_claim` | claim and acknowledge notice deliveries; run the watchdog | read or write any table; call any `api_*` or host function |
+| `control_watchdog_owner` (NOLOGIN, C1.2) | member of `pg_signal_backend` and `pg_read_all_stats` | own `sentinel_watchdog`, which terminates **only `control_app`** backends **of its own database** | signal superuser backends; anything else |
+| Superuser (host) | everything; `.env.host` | bootstrap; recovery requests; channel setup; operator approval; tamper (detectable offline against signed anchors) | — (infrastructure trust) |
 
 **Why the schema owner exists (review P-F1, HIGH, fixed in 207).** Before 207, `control_definer` owned schema `control` and the invoker-rights helpers that `control_auth` and `control_audit_owner` execute. By rewriting `es256_verify` or `new_secret`, it could run code **as** those roles: it could mint sessions or rewrite the audit chain. It could also shadow `make_interval` (schema owners can create objects), and it owned the settings holding the WebAuthn origin. Now no runtime role has CREATE on any schema. Shared helpers belong to the inert `control_schema_owner`, and the settings belong to `control_auth`. A test enforces that no runtime role can execute an invoker-rights function owned by a *different* runtime role, and the reviewer's exploit steps run as `control_definer` are all refused.
 
 No new network service was added. The privileged verifier is a role inside Postgres, so there is no extra process, port or credential to protect.
 
-**Advisory locks.** These are callable by every role, including `control_app`. 207 replaced the audit and bootstrap advisory locks with row locks on owner-only tables. A session-level advisory lock therefore no longer blocks audited actions. A `control_app` **transaction held open** after an audited call still holds the audit row lock: residual RM-3 in [RESIDUAL_RISKS_C1_1.md](RESIDUAL_RISKS_C1_1.md). Since 210, auth entry points refuse a transaction more than 5 s old (`STALE_TRANSACTION`), so expiry cannot be outlived inside one. One advisory lock remains, per request id in `api_tenant_transition` (negligible).
+**Advisory locks.** Until 217 these were callable by every role, including `control_app`. 207 replaced the audit and bootstrap advisory locks with row locks on owner-only tables. 217 revoked every advisory-lock function from PUBLIC (transaction-scoped variants are granted only to the owner roles), and `plpgsql` USAGE (no `DO` blocks for `control_app`). A `control_app` **transaction held open** after an audited call still holds the audit row lock: residual RM-3 in [RESIDUAL_RISKS_C1_1.md](RESIDUAL_RISKS_C1_1.md). Since 210, auth entry points refuse a transaction more than 5 s old (`STALE_TRANSACTION`), so expiry cannot be outlived inside one. One advisory lock remains, per request id in `api_tenant_transition` (negligible).
 
-**Startup integrity check (210, 211).** The server refuses to start (`CONTRACT_MISMATCH`) unless all of these hold:
-- contract `orvix-control/0.3`;
+**Startup integrity check (210, 211, C1.2).** The server refuses to serve (`CONTRACT_MISMATCH`) unless all of these hold, checked at start and again every 30 s:
+- contract `orvix-control/0.4`;
 - cluster `orvix-control-dev`;
 - every SECURITY DEFINER function in `control` pins `search_path`;
 - `control_app`'s role defaults are exactly the expected set, with no per-database overrides;
-- the session's effective `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `temp_file_limit`, `default_transaction_read_only` and `row_security` have their expected values.
+- the session's effective `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `temp_file_limit`, `transaction_timeout`, `default_transaction_read_only` and `row_security` have their expected values;
+- `max_prepared_transactions` is 0 (prepared transactions would survive the watchdog);
+- no `SUPERUSER` or `SENTINEL` variable is in the server's environment (`src/server/config.ts`).
 
-`npm run db:migrate` restores the defaults, including clearing per-database overrides. It is a startup check, so a change made while the server is running is caught at the next start.
+`npm run db:migrate` restores the full canonical defaults (whatever the database's ledger says), including clearing per-database overrides. A change made while the server is running is caught within 30 s.
 
 **Note on migration 200's header:** it says `control_definer` owns every table and API function. That was true at 200; 205, 207 and 210 changed ownership as described above. Applied migrations are not edited, because their checksums are in the ledger.
 
@@ -71,8 +75,8 @@ No new network service was added. The privileged verifier is a role inside Postg
 
 | Risk | Severity | Why accepted for now |
 |---|---|---|
-| A6 relay of a live ceremony (see above) | MEDIUM | Inherent to server-mediated WebAuthn. Mitigated by single-use bound grants, the 15-min pending window and banner, and the SUBJECT_ACTIVE guard. |
-| The global login-challenge limit (20 per 15 min) can be exhausted by anyone who can reach the server | MEDIUM (availability) | The server is reachable only on loopback via SSH tunnel. Per-source limits need a network identity that the tunnel removes. |
-| `control_app` can ROLLBACK an explicit transaction around `api_*` calls, which suppresses **refusal** and **read/export** audit rows | MEDIUM | Effects are always atomic with their audit row, so an effect cannot be hidden. Reads are limited to what the relayed session may see anyway. Closing this needs an autonomous-transaction log (no extension available). |
+| A6 relay of a live ceremony (see above) | LOW with a watched host channel; MEDIUM without (C1.2) | Inherent to server-mediated WebAuthn. Mitigated by single-use bound grants, delivery-gated passkeys, recovery links and activations, and out-of-band notices. |
+| First sign-in on a new device shares the anonymous login bucket | LOW (availability, C1.2) | Known devices have their own buckets (213, capped at 5 per identity in 217); a hard ceiling bounds total challenges. |
+| `control_app` can ROLLBACK an explicit transaction around `api_*` calls, which suppresses **refusal** and **read/export** audit rows | LOW–MEDIUM (C1.2) | Effects are always atomic with their audit row. Rolled-back rows are now **detected** through MAC-verified shadow lines in the server log (214, 217); held transactions are terminated by the watchdog. |
 | `control_app` can change its own session timeouts and role settings and password | LOW | PostgreSQL lets every role change its own settings. It is a DoS or lock-out risk only. Monitor it, and reset it on deploy. |
 | Postgres superuser on the host | — | Infrastructure trust. Detection relies on **offline** v2 anchors (`docs/AUDIT_EVIDENCE.md`). |

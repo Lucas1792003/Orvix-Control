@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ROOT } from "../../scripts/env";
-import { createTestDb, hostBootstrap, type TestDb } from "../helpers/db";
+import { backdateDeliveries, createTestDb, deliverAll, hostBootstrap, type TestDb } from "../helpers/db";
 import { verifyAnchorBundle, verifyChain } from "../../scripts/verify-audit";
 import { createHash } from "node:crypto";
 import { SoftAuthenticator } from "../helpers/softAuthenticator";
@@ -46,7 +46,10 @@ async function loginWith(auth: SoftAuthenticator, assertOpts = {}) {
 beforeAll(async () => {
   db = await createTestDb({ name: "orvix_control_e2e", seed: true });
   server = spawn("npx", ["next", "start", "--hostname", "localhost", "--port", "3410"], {
-    cwd: ROOT, env: { ...process.env, ORVIX_DB_NAME: "orvix_control_e2e", NODE_ENV: "production" }, stdio: ["ignore", "pipe", "pipe"],
+    cwd: ROOT,
+    // the server gets only what a real deployment gives it: no host (superuser) or sentinel secrets
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/SUPERUSER|SENTINEL/.test(k))),
+           ORVIX_DB_NAME: "orvix_control_e2e", NODE_ENV: "production" }, stdio: ["ignore", "pipe", "pipe"],
   });
   server.stdout!.on("data", (d) => { serverLog += d; });
   server.stderr!.on("data", (d) => { serverLog += d; });
@@ -108,6 +111,7 @@ describe("passkey enrolment, login, step-up, logout", () => {
   let cookie: string;
   let csrf: string;
   let enrolToken: string;
+  let deviceCookie: string;
 
   it("bootstrap token -> passkey registration (real attestation verification)", async () => {
     const boot = await hostBootstrap(db, "owner@example.invalid", "E2E Owner");
@@ -154,6 +158,11 @@ describe("passkey enrolment, login, step-up, logout", () => {
     expect(sc).toMatch(/SameSite=Strict/i);
     expect(sc).toMatch(/Path=\//);
     expect(sc).not.toMatch(/Domain=/i);
+    // 213: a device cookie (rate-limit scope only) with the same flags
+    const dev = r.headers.getSetCookie().find((c) => c.startsWith("__Host-orvix_dev="))!;
+    expect(dev).toMatch(/^__Host-orvix_dev=[0-9a-f]{64}; /);
+    expect(dev).toMatch(/HttpOnly/i); expect(dev).toMatch(/Secure/i); expect(dev).toMatch(/SameSite=Strict/i); expect(dev).not.toMatch(/Domain=/i);
+    deviceCookie = dev.split(";")[0]!;
     cookie = cookieFrom(r)!;
     const s = await req("/api/auth/session", { cookie });
     expect(s.body).toMatchObject({ ok: true, identity: { role: "owner" }, activeCredentials: 1 });
@@ -227,7 +236,14 @@ describe("passkey enrolment, login, step-up, logout", () => {
     expect((await req("/api/auth/session", { cookie })).body.pendingCredentials).toBe(1);
     const page = await req("/", { cookie, origin: null });
     expect(page.body).toContain("still pending");
+    expect((await loginWith(backup)).status).toBe(401);   // delay passed below, but the out-of-band notice is not yet delivered
     await db.su.query("UPDATE control.webauthn_credentials SET usable_after = now() WHERE usable_after > now()");
+    await db.su.query("DELETE FROM control.rate_limits");
+    expect((await loginWith(backup)).status).toBe(401);
+    await deliverAll(db);                                 // the sentinel delivers the notice
+    expect((await loginWith(backup)).status).toBe(401);   // the 15-minute reaction window starts at delivery (217)
+    await backdateDeliveries(db);
+    await db.su.query("DELETE FROM control.rate_limits");
     expect((await loginWith(backup)).status).toBe(200);
   });
 
@@ -287,6 +303,39 @@ describe("passkey enrolment, login, step-up, logout", () => {
     const ev = await db.su.query("SELECT count(*)::int n FROM control.audit_events WHERE action = 'platform.credential_counter_regression'");
     expect(ev.rows[0].n).toBe(1);
     await db.su.query("UPDATE control.webauthn_credentials SET counter_suspect_at = NULL");
+  });
+
+  it("a known device keeps signing in while anonymous login challenges are exhausted (213)", async () => {
+    await db.su.query("DELETE FROM control.rate_limits");
+    for (let i = 0; i < 20; i++) await req("/api/auth/login/options", { body: {} });
+    expect((await req("/api/auth/login/options", { body: {} })).status).toBe(429);
+    const o = await req("/api/auth/login/options", { body: {}, cookie: deviceCookie });
+    expect(o.status).toBe(200);
+    const v = await req("/api/auth/login/verify", { body: { response: auth.assert(o.body.options) }, cookie: deviceCookie });
+    expect(v.status).toBe(200);
+    await db.su.query("DELETE FROM control.rate_limits");
+  });
+
+  it("invites a second owner over HTTP; the invitee enrols, sees a fingerprint, and can sign in only after host approval (215)", async () => {
+    const email = "second-owner@example.invalid";
+    const target = `owner:${createHash("sha256").update(email).digest("hex")}`;
+    const so = await req("/api/auth/stepup/options", { body: { action: "operator_invite", target }, cookie, csrf });
+    expect((await req("/api/auth/stepup/verify", { body: { response: auth.assert(so.body.options) }, cookie, csrf })).status).toBe(200);
+    const inv = await req("/api/operators/invite", { body: { email, displayName: "Second Owner", role: "owner" }, cookie, csrf });
+    expect(inv.status).toBe(200);
+    const invitee = new SoftAuthenticator();
+    const eo = await req("/api/auth/enroll/options", { body: { token: inv.body.enrolment_token } });
+    expect(eo.body.purpose).toBe("invite");
+    const ev = await req("/api/auth/enroll/verify", { body: { token: inv.body.enrolment_token, response: invitee.register(eo.body.options) } });
+    expect(ev.body).toMatchObject({ ok: true, purpose: "invite", awaitingHostApproval: true });
+    await db.su.query("DELETE FROM control.rate_limits");
+    expect((await loginWith(invitee)).status).toBe(401);
+    await deliverAll(db);
+    const ap = (await db.su.query("SELECT control.host_approve_operator($1, $2) AS r", [email, ev.body.fingerprint])).rows[0].r;
+    expect(ap.ok).toBe(true);
+    expect((await loginWith(invitee)).status).toBe(200);
+    const list = await req("/api/operators", { cookie });
+    expect(list.body.operators.map((o: { email: string; state: string }) => `${o.email}:${o.state}`)).toContain(`${email}:active`);
   });
 
   it("an idle-expired session is refused by the server and audited", async () => {

@@ -153,6 +153,17 @@ export function parseStrict(text: string): unknown {
   return v;
 }
 
+// Terminal-safe text: everything outside printable ASCII is shown as \uXXXX (covers C0/C1, ESC, bidi controls,
+// zero-width and line/paragraph separators, BOM, soft hyphen, tag characters). Used for every printed value.
+export function safe(v: unknown): string {
+  return Array.from(String(v ?? "")).map((ch) => {
+    const c = ch.codePointAt(0)!;
+    if (c >= 0x20 && c <= 0x7e && ch !== "\\") return ch;
+    if (ch === "\\") return "\\\\";
+    return c > 0xffff ? `\\u{${c.toString(16)}}` : `\\u${c.toString(16).padStart(4, "0")}`;
+  }).join("");
+}
+
 export function anchorChallenge(seq: number, headHex: string, nonceHex: string): string {
   return sha256(`orvix-control/anchor/v1|${seq}|${headHex}|${nonceHex}`).toString("base64url");
 }
@@ -296,11 +307,11 @@ if (process.argv[1]?.endsWith("verify-audit.ts")) {
         (r.v1Checked ? ` and ${r.v1Checked} passkey bundle(s)` : "") +
         (r.unanchoredTail ? `; WARNING ${r.unanchoredTail} later event(s) are chain-consistent but NOT anchored` : "") + ".");
     } else {
-      console.error(`FAIL: ${r.reason}`);
+      console.error(`FAIL: ${safe(r.reason)}`);
       process.exit(1);
     }
   } catch (e) {
-    console.error(`FAIL: ${(e as Error).message.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?")}`);
+    console.error(`FAIL: ${safe((e as Error).message)}`);
     process.exit(1);
   }
 }

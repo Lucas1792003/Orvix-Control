@@ -24,6 +24,8 @@
     "audit:verify": "tsx scripts/verify-audit.ts",
     "audit:keygen": "tsx scripts/anchor-keygen.ts",
     "audit:sign": "tsx scripts/anchor-sign.ts",
+    "audit:shadow": "tsx scripts/audit-shadow.ts",
+    "sentinel": "tsx scripts/sentinel.ts",
     "host": "tsx scripts/host.ts"
   },
   "dependencies": {

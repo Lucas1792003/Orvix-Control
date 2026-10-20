@@ -46,7 +46,7 @@ describe("signing", () => {
     const b = await db.api("api_anchor_begin", owner.token);
     const forged = assertionParts(new SoftAuthenticator().assert({ challenge: b.challenge }));
     expect((await db.api("api_anchor_complete", owner.token, owner.auth.id, forged.cdj, forged.ad, forged.sig, "x")).error).toBe("SIGNATURE_INVALID");
-    const lb = await db.api("api_login_begin");
+    const lb = await db.api("api_login_begin", null);
     const l = assertionParts(owner.auth.assert({ challenge: lb.challenge }));
     expect((await db.api("api_anchor_complete", owner.token, l.id, l.cdj, l.ad, l.sig, "x")).error).toBe("INVALID_CHALLENGE");
   });
@@ -287,8 +287,10 @@ describe("final review follow-ups (offline tools)", () => {
   });
 
   it("the signer escapes control characters, ANSI sequences and bidi overrides before printing", () => {
-    expect(safe("x\u001b[2K\r")).toBe("x\\u001b[2K\\r");
+    expect(safe("x\u001b[2K\r")).toBe("x\\u001b[2K\\u000d");
     expect(safe("a\u202eb")).toBe("a\\u202eb");
+    // 211 review: zero-width, line/paragraph separators, BOM, soft hyphen, tag characters
+    for (const ch of ["\u200b", "\u2028", "\u2029", "\ufeff", "\u00ad", "\u061c", "\u{e0041}"]) expect(safe(`a${ch}b`)).not.toContain(ch);
     expect(safe("plain owner")).toBe("plain owner");
   });
 });

@@ -43,7 +43,9 @@ export const ERROR_TEXT: Record<string, string> = {
   SELF_APPROVAL_FORBIDDEN: "You cannot approve your own recovery. Another owner must do it.",
   HEAD_CHANGED: "The audit log changed while signing. Investigate before anchoring again.",
   RECOVERY_CONTESTED: "This request is contested (the operator objected or used a passkey since). It needs host confirmation and a 12-hour wait.",
-  CREDENTIAL_PENDING: "That passkey is still pending activation.",
+  CREDENTIAL_PENDING: "That passkey is still pending: it activates 15 minutes after its out-of-band notice was delivered.",
+  NOTIFICATION_PENDING: "Waiting for the out-of-band security notice to be delivered. Try again in a minute; if it persists, the host must check the sentinel.",
+  ALREADY_EXISTS: "An operator or open invitation already exists for that email.",
 };
 
 export function downloadJson(name: string, data: unknown) {

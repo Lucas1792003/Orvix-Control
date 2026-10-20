@@ -19,24 +19,31 @@ Platform Admin Console for Orvix: a **local development foundation**. It is sepa
 
 ```bash
 npm install
-npm run db:up          # preflight, generate .env.local (0600, dev-only random passwords), start Postgres
+npm run db:up          # preflight, generate .env.local (app), .env.host (superuser), .env.sentinel (all 0600, dev-only random passwords), start Postgres
 npm run db:migrate     # apply db/migrations/2xx (own ledger: control_ledger.schema_migrations)
 npm run db:seed        # synthetic tenants + pos_mock stand-in tenant tables
 npm run bootstrap-owner -- --email you@example.invalid --name "Your Name"   # HOST ONLY (superuser): one-time enrolment URL
+npm run host -- notify-add --recipient host --kind file --target /absolute/path/notices.jsonl   # HOST ONLY: out-of-band channel
+npm run sentinel       # separate process: delivers out-of-band notices + transaction watchdog (needed for gated actions)
 npm run dev            # http://localhost:3410 → open the enrolment URL, register a passkey, then sign in
 ```
+
+The web server loads only `.env.local` and refuses to start if a superuser or sentinel variable is in its environment. The sentinel loads only `.env.local` (minus the app password) and `.env.sentinel`.
 
 ## Tests
 
 ```bash
-npm test               # 177 DB tests: crypto (vs OpenSSL), trust boundary, privileges, auth/sessions, passkeys,
-                       # recovery, audit integrity, anchors/offline verification, upgrade continuity, guards
-npm run test:e2e       # builds, starts `next start` on :3410 against orvix_control_e2e, 21 HTTP tests
+npm test               # 225 DB tests: crypto (vs OpenSSL), trust boundary, privileges, auth/sessions, passkeys,
+                       # recovery, audit integrity, anchors/offline verification, upgrade continuity, guards,
+                       # C1.2 (notifications, scoped login limits, watchdog, shadow log, invitations, rollback drill)
+npm run test:e2e       # builds, starts `next start` on :3410 against orvix_control_e2e, 23 HTTP tests
 
 # host / owner tools
 npm run host -- recovery-request|recovery-confirm|recovery-cancel|revoke-operator|purge-expired …   # HOST ONLY (superuser)
+npm run host -- notify-add|notify-disable|notify-status|approve-operator …                          # HOST ONLY (superuser)
+npm run audit:shadow -- --log <postgres server log> [--db <name>]   # HOST: rolled-back audit events (MAC-verified lines)
 npm run audit:keygen -- --out <private dir>             # owner machine: offline anchor key
-npm run audit:sign -- --events e.json --archive <dir> --key anchor-key.pem [--init] --confirm-head <seq>
+npm run audit:sign -- --events e.json --archive <dir> --key anchor-key.pem [--init] --confirm-head <seq>:<hash prefix>
 npm run audit:verify -- --events e.json --archive <dir> --anchor-key <fingerprint>
 ```
 
@@ -55,17 +62,18 @@ Browser ──(passkey, __Host- cookie, CSRF header)──▶ Next.js (route han
                                      └─ control.audit_append → hash-chained audit (owner control_audit_owner)
 ```
 
-- `control_app` holds USAGE on schema `control` and EXECUTE on 28 `api_*` functions. It has no table privileges anywhere.
+- `control_app` holds USAGE on schema `control` and EXECUTE on 31 `api_*` functions. It has no table privileges anywhere.
 - **The database verifies WebAuthn evidence itself** (ES256 in PL/pgSQL, DB-issued challenges). The app's password alone cannot create a session, a step-up grant or a passkey. See `docs/AUTH_TRUST_BOUNDARY.md`.
 - Owner roles: `control_auth` (authentication), `control_definer` (tenant model), `control_audit_owner` (audit log and its read API), plus an inert `control_schema_owner`. No runtime role can run code as another one, or holds a privilege on another's table.
 - Every `api_*` returns `{ok:true,…}` or `{ok:false,error}`. Every effect is audited atomically with it; refusals are audited unless the caller rolls back (a documented residual). The app treats anything else as a refusal (fail closed).
-- Migrations: `200` foundation and roles · `201` audit log · `202` identities, sessions · `203` lifecycle model and audit API · `204` ES256 verifier · `205` trust boundary, multiple passkeys, step-up grants, recovery · `206` passkey anchors and export · `207` review hardening · `208` review round 2 · `209` review round 3 · `210` final checkpoint review · `211` final follow-ups.
+- Migrations: `200` foundation and roles · `201` audit log · `202` identities, sessions · `203` lifecycle model and audit API · `204` ES256 verifier · `205` trust boundary, multiple passkeys, step-up grants, recovery · `206` passkey anchors and export · `207` review hardening · `208` review round 2 · `209` review round 3 · `210` final checkpoint review · `211` final follow-ups · `212` out-of-band notifications and delivery gating · `213` scoped login limits · `214` transaction watchdog and shadow audit log · `215` operator invitations · `216` 211-review fixes · `217` C1.2-review fixes. Compatibility: [docs/MIGRATIONS_C1_2.md](docs/MIGRATIONS_C1_2.md).
+- Out-of-band notices and the sentinel: [docs/OOB_NOTIFICATIONS.md](docs/OOB_NOTIFICATIONS.md) (webhook receivers must verify the signature and return `X-Orvix-Ack`).
 
 ## Docs
 
 - [docs/POS_INTEGRATION_REQUIREMENTS.md](docs/POS_INTEGRATION_REQUIREMENTS.md): what the POS must provide, and the boundaries.
 - [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md): fixed and unresolved findings, plus verified properties.
-- [docs/AUTH_TRUST_BOUNDARY.md](docs/AUTH_TRUST_BOUNDARY.md), [docs/RECOVERY.md](docs/RECOVERY.md), [docs/AUDIT_EVIDENCE.md](docs/AUDIT_EVIDENCE.md), [docs/REVIEW_C1_1.md](docs/REVIEW_C1_1.md).
+- [docs/AUTH_TRUST_BOUNDARY.md](docs/AUTH_TRUST_BOUNDARY.md), [docs/RECOVERY.md](docs/RECOVERY.md), [docs/AUDIT_EVIDENCE.md](docs/AUDIT_EVIDENCE.md), [docs/REVIEW_C1_1.md](docs/REVIEW_C1_1.md), [docs/REVIEW_C1_2.md](docs/REVIEW_C1_2.md), [docs/RESIDUAL_RISKS_C1_2.md](docs/RESIDUAL_RISKS_C1_2.md), [docs/C1_2_BASELINE.md](docs/C1_2_BASELINE.md).
 - Design source (read-only, in the POS repo): `docs/plans/orvix-platform-control-plane-architecture.md` and `reconciliation-v2-claude4-control-plane.md`.
 
 ## Teardown

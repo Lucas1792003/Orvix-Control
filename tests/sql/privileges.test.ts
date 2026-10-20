@@ -7,14 +7,15 @@ const EXPECTED_APP_FUNCTIONS = [
   "api_anchor_begin", "api_anchor_complete", "api_anchor_export", "api_anchor_list", "api_audit_export",
   "api_audit_list", "api_audit_verify", "api_auth_failed", "api_contract_version", "api_credential_add_begin",
   "api_credential_add_complete", "api_credential_list", "api_credential_lookup", "api_credential_revoke",
-  "api_enrol_begin", "api_enrol_complete", "api_login_begin", "api_login_complete", "api_recovery_approve",
-  "api_recovery_cancel", "api_recovery_list", "api_session_get", "api_session_revoke", "api_stepup_begin", "api_stepup_complete",
+  "api_enrol_begin", "api_enrol_complete", "api_login_begin", "api_login_complete", "api_operator_invite", "api_operator_invite_revoke",
+  "api_operator_list", "api_recovery_approve", "api_recovery_cancel", "api_recovery_list", "api_session_get", "api_session_revoke", "api_stepup_begin", "api_stepup_complete",
   "api_tenant_get", "api_tenant_list", "api_tenant_transition",
 ].sort();
 // api_* functions and the role that must own each group.
 const AUTH_OWNED = ["api_anchor_begin", "api_anchor_complete", "api_auth_failed", "api_credential_add_begin",
   "api_credential_add_complete", "api_credential_list", "api_credential_lookup", "api_credential_revoke", "api_enrol_begin",
-  "api_enrol_complete", "api_login_begin", "api_login_complete", "api_recovery_approve", "api_recovery_cancel", "api_recovery_list",
+  "api_enrol_complete", "api_login_begin", "api_login_complete", "api_operator_invite", "api_operator_invite_revoke",
+  "api_operator_list", "api_recovery_approve", "api_recovery_cancel", "api_recovery_list",
   "api_session_get", "api_session_revoke", "api_stepup_begin", "api_stepup_complete"];
 const AUDIT_OWNED = ["api_audit_list", "api_audit_verify", "api_anchor_list", "api_anchor_export", "api_audit_export"];
 const CONTROL_ROLES = ["control_app", "control_definer", "control_audit_owner", "control_auth", "control_schema_owner"];

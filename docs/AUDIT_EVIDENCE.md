@@ -16,7 +16,7 @@
 2. **Periodically, and after sensitive events:** in the console, Audit → *Export events*, then download the JSON to the owner's machine.
 3. `npm run audit:sign -- --events events.json --archive <archive dir> --key anchor-key.pem`
    - The tool prints the key fingerprint and a **summary of every event since the newest anchor**: counts per action, the time range, and the sensitive rows (refusals, failures, credentials, recovery, step-ups). It then stops.
-   - Compare the summary with what you know happened. Then re-run with `--confirm-head <seq>`.
+   - Compare the summary with what you know happened. Then re-run with `--confirm-head <seq>:<hash prefix>`.
    - With an empty archive it also requires `--init` (trust on first use).
    - It **refuses** unless the export is a valid chain from genesis and agrees with **every** anchor already in the archive (`HISTORY_REWRITTEN_AT_n`, `TRUNCATED_BELOW_ANCHOR_n`).
    - On success it writes `anchor-v2-seq<n>.json` (Ed25519 over `orvix-control/anchor/v2|seq|head|signed_at`). The file is never overwritten.

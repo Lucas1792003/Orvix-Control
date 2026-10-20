@@ -75,10 +75,19 @@ export async function migrate(client: pg.Client, opts: { statusOnly?: boolean; l
 
 // Out-of-band credential step: set control_app's password (dev/test only).
 export async function setAppPassword(client: pg.Client, password: string) {
+  // control_app can ALTER its own role defaults; every migrate run restores the canonical set (cluster-wide), in ONE
+  // transaction so a failure part-way never leaves the role without timeouts. Role settings are cluster-wide, so the
+  // FULL canonical set is always applied, whatever this database's ledger says (a partially migrated test database
+  // must not weaken the role for every other database).
+  await client.query("BEGIN");
+  try {
+  // Plaintext passwords must never reach the server log, even if a statement below fails.
+  await client.query(`SET LOCAL log_statement = 'none'`);
+  await client.query(`SET LOCAL log_min_error_statement = 'panic'`);
+  await client.query(`SET LOCAL log_min_duration_statement = -1`);
+  await client.query(`SET LOCAL log_min_duration_sample = -1`);
   const { rows } = await client.query(`SELECT format('ALTER ROLE control_app PASSWORD %L', $1::text) AS stmt`, [password]);
   await client.query(rows[0].stmt);
-  // control_app can ALTER its own role defaults; every migrate run restores the canonical set (cluster-wide).
-  const applied = await client.query(`SELECT 1 FROM control_ledger.schema_migrations WHERE version = '210'`);
   await client.query(`ALTER ROLE control_app RESET ALL`);
   // per-database defaults override the role defaults and are invisible in pg_roles.rolconfig: clear them too
   const dbs = await client.query(
@@ -92,5 +101,18 @@ export async function setAppPassword(client: pg.Client, password: string) {
   await client.query(`ALTER ROLE control_app SET statement_timeout = '5s'`);
   await client.query(`ALTER ROLE control_app SET idle_in_transaction_session_timeout = '10s'`);
   await client.query(`ALTER ROLE control_app SET lock_timeout = '3s'`);
-  if (applied.rowCount) await client.query(`ALTER ROLE control_app SET temp_file_limit = '256MB'`);
+  await client.query(`ALTER ROLE control_app SET temp_file_limit = '256MB'`);
+  await client.query(`ALTER ROLE control_app SET transaction_timeout = '10s'`);
+  // sentinel credential (separate file, separate process)
+  const sentinel = await client.query(`SELECT 1 FROM pg_roles WHERE rolname = 'control_sentinel'`);
+  if (sentinel.rowCount && process.env.ORVIX_DB_SENTINEL_PASSWORD) {
+    const { rows: sp } = await client.query(`SELECT format('ALTER ROLE control_sentinel PASSWORD %L', $1::text) AS stmt`,
+      [process.env.ORVIX_DB_SENTINEL_PASSWORD]);
+    await client.query(sp[0].stmt);
+  }
+  await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  }
 }
