@@ -1,0 +1,32 @@
+# Orvix Control: isolated local development database ONLY.
+# Every resource name begins with "orvix-control-". Bound to loopback only.
+name: orvix-control-dev
+services:
+  db:
+    image: postgres:17
+    container_name: orvix-control-db
+    restart: "no"
+    environment:
+      POSTGRES_DB: orvix_control
+      POSTGRES_USER: orvix_control_super
+      POSTGRES_PASSWORD: ${ORVIX_DB_SUPERUSER_PASSWORD:?run npm run db:up}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command: ["postgres", "-c", "password_encryption=scram-sha-256", "-c", "log_statement=none", "-c", "cluster_name=orvix-control-dev"]
+    ports:
+      - "127.0.0.1:55440:5432"
+    volumes:
+      - orvix-control-pgdata:/var/lib/postgresql/data
+    networks:
+      - orvix-control-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orvix_control_super -d orvix_control"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m
+volumes:
+  orvix-control-pgdata:
+    name: orvix-control-pgdata
+networks:
+  orvix-control-net:
+    name: orvix-control-net
