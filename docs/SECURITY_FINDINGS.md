@@ -2,6 +2,8 @@
 
 Scope: this local repository only. No production system was touched. The review history and fix mapping are in [REVIEW_C1_1.md](REVIEW_C1_1.md) and [REVIEW_C1_2.md](REVIEW_C1_2.md).
 
+> **C1.3 (migrations 218–221) is not folded into this file.** Its findings, fixes and verification are in [REVIEW_C1_3.md](REVIEW_C1_3.md); the current residual-risk register is [RESIDUAL_RISKS_C1_3.md](RESIDUAL_RISKS_C1_3.md), which supersedes the C1.2 table below where they overlap (e.g. W-1 is fixed in C1.3).
+
 ## The two HIGH findings carried into C1.1
 
 | ID | Finding | Status |

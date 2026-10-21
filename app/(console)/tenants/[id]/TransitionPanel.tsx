@@ -1,8 +1,7 @@
 "use client";
 import { useState } from "react";
 import { ERROR_TEXT, postJson, stepUp } from "@/src/ui/http";
-
-type T = { to: string; allowed_roles: string[]; requires_stepup: boolean; requires_reason: boolean; available: boolean };
+import type { Transition as T } from "@/src/server/services/console";
 const REASONS = ["owner_request", "abuse", "security", "notice", "test", "other"];
 
 export function TransitionPanel({ tenantId, role, csrf, transitions }: { tenantId: string; role: string; csrf: string; transitions: T[] }) {

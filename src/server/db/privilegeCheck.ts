@@ -1,6 +1,6 @@
 // C1.3 M3/M4: database-privilege preconditions shared by the web server's startup check (src/server/db/api.ts), the
 // sentinel and the tests. Run as the connecting role. Every field must be false / 0 for the role to be allowed to run.
-export const CONTROL_DB_PATTERN = "^orvix_control(_e2e|_test_[a-z0-9]{6,16})?$";
+const CONTROL_DB_PATTERN = "^orvix_control(_e2e|_test_[a-z0-9]{6,16})?$";
 
 // Built-in functions revoked from PUBLIC by migrations 207/208/210/217/221 (any of them executable = drift or an
 // unhardened restore).

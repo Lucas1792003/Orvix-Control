@@ -1,6 +1,6 @@
 -- DEV FIXTURE ONLY (not a control migration, not in the ledger).
 -- A synthetic stand-in for POS tenant tables, so tests can prove that no control role can read tenant data.
--- Every value is invented. Nothing here is copied from, or connected to, the ShwePhaLa POS.
+-- Every value is invented. Nothing here is copied from, or connected to, the Orvix POS.
 CREATE SCHEMA IF NOT EXISTS pos_mock;
 REVOKE ALL ON SCHEMA pos_mock FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS pos_mock.organizations (id text PRIMARY KEY, name text NOT NULL, is_active boolean NOT NULL DEFAULT true);

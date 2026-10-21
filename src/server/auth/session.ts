@@ -29,7 +29,7 @@ export type Session = {
   token: string;
 };
 
-export async function readSessionToken(): Promise<string | null> {
+async function readSessionToken(): Promise<string | null> {
   const v = (await cookies()).get(SESSION_COOKIE)?.value;
   return v && TOKEN_RE.test(v) ? v : null;
 }

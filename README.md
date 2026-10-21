@@ -1,6 +1,6 @@
 # Orvix Control
 
-Platform Admin Console for Orvix: a **local development foundation**. It is separate from the Orvix POS (ShwePhaLa) repository and has no Git remote.
+Platform Admin Console for Orvix: a **local development foundation**. It is separate from the Orvix POS repository and has no Git remote.
 
 > Synthetic tenants and mock health data only. No POS connection, no production credentials, no real tenant administration, no recovery-release authority, no billing.
 
