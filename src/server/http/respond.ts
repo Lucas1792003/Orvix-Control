@@ -38,6 +38,7 @@ const STATUS: Record<string, number> = {
   POS_RECOVERY_STATE: 409,
   POS_RECOVERY_INVALID: 400,
   POS_RECOVERY_ERROR: 502,
+  POS_RECOVERY_IN_DOUBT: 504,
 };
 
 export function json(body: Record<string, unknown>, status = 200, requestId: string = randomUUID()) {

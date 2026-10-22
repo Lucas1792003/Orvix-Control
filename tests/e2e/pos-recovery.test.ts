@@ -1,14 +1,17 @@
-// Step 5 (222) over HTTP: the POS recovery page and routes against `next start` on localhost:3410, backed by
-// orvix_control_e2e with the POS Recovery V1 operator MOCK (db/dev/pos_recovery_mock.sql).
+// Step 5 (222) / Step 6 (223) over HTTP: the POS recovery page and routes against `next start` on localhost:3410, backed by
+// orvix_control_e2e, which reaches the POS Recovery V1 operator MOCK (db/dev/pos_recovery_mock.sql) in its own database
+// over the network bridge. The real POS is exercised by the POS repository's Step 6 integration run.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ROOT } from "../../scripts/env";
-import { createTestDb, hostBootstrap, installPosRecoveryMock, revokePosRecoveryGrant, type TestDb } from "../helpers/db";
+import { createTestDb, hostBootstrap, installPosRecoveryMock, type PosMock, type TestDb } from "../helpers/db";
+import { configurePosBridge, removePosBridge } from "../../scripts/pos-bridge";
 import { SoftAuthenticator } from "../helpers/softAuthenticator";
 
 const BASE = "http://localhost:3410";
 let db: TestDb;
+let pos: PosMock;
 let server: ChildProcess;
 let serverLog = "";
 const auth = new SoftAuthenticator();
@@ -38,7 +41,7 @@ async function stepUp(action: string, target: string) {
 
 beforeAll(async () => {
   db = await createTestDb({ name: "orvix_control_e2e", seed: true });
-  await installPosRecoveryMock(db);
+  pos = await installPosRecoveryMock(db);
   server = spawn(process.execPath, [`${ROOT}/node_modules/next/dist/bin/next`, "start", "--hostname", "localhost", "--port", "3410"], {
     cwd: ROOT, detached: true,
     env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/SUPERUSER|SENTINEL/.test(k))),
@@ -65,7 +68,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (server?.pid) { try { process.kill(-server.pid, "SIGTERM"); } catch { /* already gone */ } }
   await new Promise((r) => setTimeout(r, 500));
-  if (db) await revokePosRecoveryGrant(db.su);
+  await pos?.drop();
   await db?.drop();
 });
 
@@ -127,17 +130,23 @@ describe("POS recovery over HTTP", () => {
     expect((await req(`/api/pos-recovery/orgs/org-synthetic-b/devices/${enr}/contain`, { body, csrf })).body).toMatchObject({ ok: true, state: "SUSPENDED" });
   });
 
-  it("without the POS-owner's grant the page says the hook is not installed and the API is 503", async () => {
-    await revokePosRecoveryGrant(db.su);
+  it("without the network bridge the page says BLOCKED and the API is 503; a POS that is down is the same", async () => {
+    const c = await db.su.connect();
     try {
-      const api = await req("/api/pos-recovery");
+      await removePosBridge(c);
+      let api = await req("/api/pos-recovery");
       expect([api.status, api.body]).toEqual([503, { ok: false, error: "POS_RECOVERY_UNAVAILABLE" }]);
       const page = await req("/pos-recovery", { origin: null });
       expect(page.status).toBe(200);
-      expect(page.body).toContain("BLOCKED: POS recovery hook not installed");
+      expect(page.body).toContain("BLOCKED: POS recovery interface unavailable");
+      await configurePosBridge(c, { ...pos.settings, port: 1 });   // nothing listens there
+      api = await req("/api/pos-recovery");
+      expect([api.status, api.body]).toEqual([503, { ok: false, error: "POS_RECOVERY_UNAVAILABLE" }]);
     } finally {
-      await db.su.query("GRANT orvix_recovery_operator TO control_definer WITH INHERIT TRUE, SET FALSE, ADMIN FALSE");
+      await configurePosBridge(c, pos.settings);
+      c.release();
     }
+    expect((await req("/api/pos-recovery")).status).toBe(200);
   });
 
   it("the audit chain verifies after the run", async () => {

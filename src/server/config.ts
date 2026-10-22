@@ -34,6 +34,6 @@ export const config = (() => {
     rpID,
     rpName: "Orvix Control (dev)",
     origin,
-    contractVersion: "orvix-control/0.6",
+    contractVersion: "orvix-control/0.7",
   } as const;
 })();

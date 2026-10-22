@@ -60,10 +60,11 @@ export default async function PosRecoveryPage({ searchParams }: { searchParams: 
       </div>
 
       {!overview.ok && overview.error === "POS_RECOVERY_UNAVAILABLE" && (
-        <Blocked title="BLOCKED: POS recovery hook not installed">
-          The <code>recovery_v1.operator_*</code> interface is missing, incomplete, or not granted to Control
-          (<code>orvix_recovery_operator</code> → <code>control_definer</code> is a POS-owner decision). Every recovery
-          transition, containment and submission is blocked. Control does not fall back to anything else.
+        <Blocked title="BLOCKED: POS recovery interface unavailable">
+          The network bridge to the POS (<code>recovery_v1.operator_*</code> through the POS login granted
+          <code>orvix_recovery_operator</code>, a POS-owner decision) is not configured, unreachable, over-privileged or
+          incomplete. Every recovery transition, containment and submission is blocked. Control does not fall back to
+          anything else.
         </Blocked>
       )}
       {!overview.ok && overview.error !== "POS_RECOVERY_UNAVAILABLE" && (
@@ -164,7 +165,8 @@ function OrgDetail({ org: o, role, csrf, audit }: { org: PosOrg; role: string; c
           {o.devices.enrollments.map((e) => (
             <li key={e.enrollmentId} className="flex flex-wrap items-center gap-3 py-2">
               <span className="font-mono">{e.deviceId}</span><StateBadge value={e.state} />
-              <span className="text-xs text-muted">shop {e.shopId} · key {e.keyFingerprint.slice(0, 16)}…{e.notAfter && ` · until ${fmtTime(e.notAfter)}`}</span>
+              <span className="text-xs text-muted">shop {e.shopId} · key {e.keyFingerprint.slice(0, 16)}…{e.notAfter && ` · until ${fmtTime(e.notAfter)}`}
+                {e.state === "SUSPENDED" && e.suspensionEventId != null && <> · <span data-testid="suspension-event">suspension event {e.suspensionEventId}</span> (a reinstatement must name it)</>}</span>
               <span className="ml-auto"><DeviceActions org={o.orgId} enrollmentId={e.enrollmentId} state={e.state} csrf={csrf} /></span>
             </li>
           ))}

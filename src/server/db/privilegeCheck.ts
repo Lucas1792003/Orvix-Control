@@ -11,10 +11,9 @@ const REVOKED_BUILTINS = ["pg_advisory_lock", "pg_advisory_lock_shared", "pg_try
 
 const OWNERS = "'{control_auth,control_definer,control_audit_owner,control_schema_owner,control_watchdog_owner}'::text[]";
 
-// Step 5 (222): role memberships of the control roles. The ONLY tolerated ones are control_watchdog_owner's two built-in
-// monitoring roles (218) and, when the POS role exists, the POS-owner's single-database grant
-// `orvix_recovery_operator TO control_definer` with INHERIT only (no SET ROLE, no ADMIN). That role must itself be a
-// plain NOLOGIN role that is a member of nothing (so nothing further is inherited through it).
+// Role memberships of the control roles. The ONLY tolerated ones are control_watchdog_owner's two built-in monitoring
+// roles (218). Step 6 (223): Control reaches the POS over the network (dblink, user mapping for control_definer), so 222's
+// single-database grant `orvix_recovery_operator TO control_definer` is no longer tolerated either.
 const CONTROL_ROLES = "'{control_app,control_auth,control_definer,control_audit_owner,control_schema_owner,control_sentinel,control_watchdog_owner}'::text[]";
 
 export const PRIVILEGE_CHECK_SQL = `
@@ -41,15 +40,17 @@ export const PRIVILEGE_CHECK_SQL = `
               WHERE n.nspname = 'control' AND r.rolname <> ALL (${OWNERS})))::int AS superuser_owned,
          (SELECT count(*) FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member
            WHERE (m.rolname = ANY (${CONTROL_ROLES}) OR g.rolname = ANY (${CONTROL_ROLES}))
-             AND NOT (m.rolname = 'control_watchdog_owner' AND g.rolname IN ('pg_read_all_stats', 'pg_signal_backend') AND NOT a.admin_option)
-             AND NOT (m.rolname = 'control_definer' AND g.rolname = 'orvix_recovery_operator'
-                      AND a.inherit_option AND NOT a.set_option AND NOT a.admin_option
-                      AND NOT g.rolcanlogin AND NOT g.rolsuper AND NOT g.rolbypassrls AND NOT g.rolcreaterole AND NOT g.rolcreatedb
-                      AND NOT g.rolreplication
-                      AND NOT EXISTS (SELECT 1 FROM pg_auth_members x WHERE x.member = g.oid)))::int AS memberships`;
+             AND NOT (m.rolname = 'control_watchdog_owner' AND g.rolname IN ('pg_read_all_stats', 'pg_signal_backend') AND NOT a.admin_option))::int AS memberships,
+         -- 223: the network bridge to the POS is control_definer's alone: the connecting role must not be able to execute any
+         -- dblink / postgres_fdw function, use any foreign server, or hold a user mapping (its own or PUBLIC's)
+         ((SELECT count(*) FROM pg_proc p JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+             JOIN pg_extension x ON x.oid = d.refobjid AND x.extname IN ('dblink', 'postgres_fdw')
+            WHERE has_function_privilege(current_user, p.oid, 'EXECUTE'))
+          + (SELECT count(*) FROM pg_foreign_server s WHERE has_server_privilege(current_user, s.oid, 'USAGE'))
+          + (SELECT count(*) FROM pg_user_mappings u WHERE u.usename IN (current_user, 'public')))::int AS bridge`;
 
 export type PrivilegeRow = { temp_here: boolean; create_here: boolean; public_here: boolean; other_dbs: number; builtins: number;
-  plpgsql: boolean; superuser_owned: number; memberships: number };
+  plpgsql: boolean; superuser_owned: number; memberships: number; bridge: number };
 
 export function privilegeProblems(r: PrivilegeRow | undefined): string[] {
   if (!r) return ["privilege check returned nothing"];
@@ -61,6 +62,7 @@ export function privilegeProblems(r: PrivilegeRow | undefined): string[] {
   if (r.builtins !== 0) out.push("role can execute revoked built-in functions (advisory locks, large objects, NOTIFY, WAL or xid)");
   if (r.plpgsql !== false) out.push("role has USAGE on plpgsql");
   if (r.superuser_owned !== 0) out.push("control objects are owned by a superuser or another unexpected role (restored with --no-owner?)");
-  if (r.memberships !== 0) out.push("a control role has an unexpected role membership (only orvix_recovery_operator -> control_definer, inherit-only, is tolerated)");
+  if (r.memberships !== 0) out.push("a control role has an unexpected role membership");
+  if (r.bridge !== 0) out.push("role can use the POS network bridge (dblink/foreign server/user mapping): only control_definer may");
   return out;
 }

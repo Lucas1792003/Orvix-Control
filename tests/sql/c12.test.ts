@@ -509,7 +509,7 @@ describe("migration upgrade and rollback drill (forward-only migrations + restor
       const { applied } = await migrate(c); await c.end();
       expect(applied).toEqual(["212_oob_notifications.sql", "213_scoped_login_limits.sql", "214_txn_watchdog_shadow_audit.sql",
         "215_operator_invitations.sql", "216_review_211_fixes.sql", "217_review_c1_2_fixes.sql",
-        "218_watchdog_intents.sql", "219_recovery_auth_hardening.sql", "220_sentinel_delivery.sql", "221_privileges_tenant_contract.sql", "222_pos_recovery_bridge.sql"]);
+        "218_watchdog_intents.sql", "219_recovery_auth_hardening.sql", "220_sentinel_delivery.sql", "221_privileges_tenant_contract.sql", "222_pos_recovery_bridge.sql", "223_pos_recovery_network_bridge.sql"]);
       // "rollback": restore the pre-upgrade dump into a fresh database
       const admin = new pg.Client({ ...superuserConfig(), database: "orvix_control" }); await admin.connect();
       await admin.query(`CREATE DATABASE ${restored}`); await admin.end();
@@ -522,7 +522,7 @@ describe("migration upgrade and rollback drill (forward-only migrations + restor
         expect((await r.query("SELECT max(seq)::int s FROM control.audit_events")).rows[0].s).toBe(head211.s);
         expect((await r.query("SELECT * FROM control.audit_verify()")).rows[0].ok).toBe(true);
         const re = await migrate(r);
-        expect(re.applied).toHaveLength(11);
+        expect(re.applied).toHaveLength(12);
         expect((await r.query("SELECT * FROM control.audit_verify()")).rows[0].ok).toBe(true);
       } finally { await r.end(); }
     } finally {

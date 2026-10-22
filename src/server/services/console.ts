@@ -49,7 +49,9 @@ export async function listAudit(s: Session, limit = 50, beforeSeq: number | null
 }
 
 // ------------------------------------------------------------ Step 5 (222): POS recovery bridge (metadata only)
-export type PosEnrollment = { enrollmentId: string; shopId: string; deviceId: string; keyFingerprint: string; state: string; notAfter: string | null; replaces: string | null };
+export type PosEnrollment = { enrollmentId: string; shopId: string; deviceId: string; keyFingerprint: string; state: string; notAfter: string | null; replaces: string | null;
+  /** Step 6: the current suspension event (what an owner's device-reinstate authorization names); null unless SUSPENDED */
+  suspensionEventId?: number | null };
 export type PosDeviceRequest = { requestId: string; shopId: string; deviceId: string; keyFingerprint: string; shortCode: string; requestNonce: string;
   replaces: string | null; requestedAt: string; requestedBy: string };
 export type PosOrg = {

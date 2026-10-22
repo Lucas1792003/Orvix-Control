@@ -138,7 +138,9 @@ compared with the dev mock (`db/dev/pos_recovery_mock.sql`) and with 222's own h
 - **No recovery-release authority, no signing key.** `transition` refuses `ACTIVE` (and anything but the three
   containment states) before calling the POS. Only an owner-signed reopening, verified by the POS, sets ACTIVE; Control
   carries its text and hex signature unchanged and cannot create one. No Control function reads a POS table.
-- **Single-database prerequisite (POS-owner decision):** `GRANT orvix_recovery_operator TO control_definer WITH INHERIT
+- **Superseded by 223 (§11):** the single-database prerequisite below applied to 222 only. Since 223 Control reaches the
+  POS over the network and the startup check REFUSES this membership.
+- *(222 only)* **Single-database prerequisite (POS-owner decision):** `GRANT orvix_recovery_operator TO control_definer WITH INHERIT
   TRUE, SET FALSE, ADMIN FALSE`. Without it, or without all seven functions, every API returns
   `POS_RECOVERY_UNAVAILABLE` (audited) and the page says BLOCKED. The app's startup check
   (`src/server/db/privilegeCheck.ts`) tolerates that one inherit-only membership, and only while
@@ -156,3 +158,34 @@ compared with the dev mock (`db/dev/pos_recovery_mock.sql`) and with 222's own h
 - **Open (POS side):** `orvix_recovery_operator` also holds EXECUTE on `recovery_v1.fence_key`, `request_unfence` and
   `ledger_retention_report`. Through the grant, `control_definer` could execute them, although no Control code calls
   them. If Control must hold strictly the seven operator functions, the POS should move those three to a separate role.
+
+## 11. Step 6: network bridge (migration 223, provisional, contract `orvix-control/0.7`)
+
+Control and the POS are **separate systems with separate databases**. 223 keeps 222's API, roles, step-up and audit
+rules and changes only the transport: Control's database calls the seven `recovery_v1.operator_*` functions over the
+network (`dblink`, schema `control_ext`, executable by `control_definer` only) as a dedicated POS login.
+
+| Item | Requirement |
+|---|---|
+| Topology | **Owner decision.** This contradicts §2's "one database, one ledger" (R2). Step 6 implemented and tested the two-database topology the Step 6 brief required; if R2's single database is kept, 222's in-database model would be needed instead. |
+| POS login (POS owner) | `orvix_control_bridge`: LOGIN, no attributes, `CONNECTION LIMIT 8`, member of `orvix_recovery_operator` only (inherit, no SET, no ADMIN), reserved in `supautils.reserved_roles`, `statement_timeout` 4 s / `lock_timeout` 3 s / `idle_in_transaction_session_timeout` 15 s. Create it with a SCRAM verifier, not a cleartext password (`pg_stat_statements` / DDL logs). Reference script for the disposable stack: POS `tools/recovery-v1/step6/control-bridge-role.sh`. |
+| POS network | One `pg_hba` line: `hostssl postgres orvix_control_bridge <control-db-ip>/32 scram-sha-256`; nothing broader. Connect to Postgres directly (not the Supavisor pooler). |
+| POS hardening | The Supabase image grants PUBLIC write access on `net.http_request_queue` / `net._http_response` (pg_net): a SQL login can use them. Revoke them from PUBLIC (or move pg_net out of reach) before the bridge login exists (Step 6 review 3 M5). R4-M3 (`fence_key`, `request_unfence`, `ledger_retention_report` on the operator role) is now reachable with a network credential: split the role. |
+| TLS | `sslmode=verify-full` with `sslrootcert` is required by `scripts/pos-bridge.ts`, and the bridge checks `pg_stat_ssl` on every call. `ORVIX_POS_BRIDGE_INSECURE_DEV=1` exists for a disposable local stack only and is recorded (`control.pos_bridge_binding.tls_required = false`). |
+| Binding | `scripts/pos-bridge.ts --configure` records the Control database identity (system identifier, oid, name). A restored or copied Control database has **no working bridge** until the host configures it there. Run `--remove` first in any restore drill. |
+| Secrets | The bridge password lives in a user mapping (readable by the cluster superuser and `control_definer`) and therefore in every full `pg_dump` of the Control database: treat Control backups as secrets. Rotate with `--configure` (fails closed during the switch). |
+| Control host | PostgreSQL 17+ (interruptible dblink; `transaction_timeout`). Egress firewall: the Control database host may reach only the POS database port. |
+| Upgrade from 222 | Revoke `orvix_recovery_operator` from `control_definer` (the startup check refuses it after 223), apply 223, then configure the bridge. |
+
+**Atomicity.** Each mutating call runs in a remote transaction committed **last**, after Control's audit row and request
+result are written. A Control failure before that point rolls the POS back. A lost reply at COMMIT, or no reply within the
+caller's `statement_timeout`, is `POS_RECOVERY_IN_DOUBT`. That result is audited, sent out of band, and stored, so a replay answers in doubt instead of calling the POS again.
+**Known window (no two-phase commit):** once a call returned, a rollback of the caller's own transaction, or a crash before the
+local commit, cannot undo the POS change. The POS audit actor carries the Control request id
+(`operator:control:<role>:<identity>:<request id>@<login>`), so the two trails can be reconciled in both directions (Step 6
+integration test I15). Automatic reconciliation by the sentinel is not implemented (open).
+
+**Failure handling.** Not configured, wrong database, unreachable, a frozen POS (handshake never answered: dblink ignores
+`connect_timeout`, so the bound is the caller's `statement_timeout`, 5 s in the web server), TLS required but absent, an
+over-privileged POS login, or an incomplete contract all give `POS_RECOVERY_UNAVAILABLE`. These outcomes are audited with the reason, and the step-up is not consumed.
+Only the contract's refusal outcomes (`refused`, `denied`) are committed on the POS; anything else is abandoned.

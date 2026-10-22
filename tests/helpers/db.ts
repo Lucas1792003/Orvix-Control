@@ -7,6 +7,7 @@ import pg from "pg";
 import { appConfig, devDbTarget, loadDevEnv, ROOT, sentinelConfig, superuserConfig } from "../../scripts/env";
 import { migrate, setAppPassword } from "../../scripts/migrator";
 import { SoftAuthenticator } from "./softAuthenticator";
+import { configurePosBridge, type BridgeSettings } from "../../scripts/pos-bridge";
 
 export type TestDb = {
   name: string;
@@ -219,16 +220,40 @@ export async function backdateDeliveries(db: TestDb) {
   await db.su.query("UPDATE control.notify_deliveries SET delivered_at = delivered_at - interval '1 day' WHERE delivered_at > now() - interval '1 day'");
 }
 
-// Step 5: the POS Recovery V1 operator-interface MOCK (db/dev/pos_recovery_mock.sql), loaded by the superuser. Its
-// `GRANT orvix_recovery_operator TO control_definer` is a CLUSTER-WIDE role membership: create every other test
-// database of the file BEFORE loading it (migration 207 refuses to run while a control role has memberships), and
-// call revokePosRecoveryGrant when done (test files run one at a time).
-export async function installPosRecoveryMock(db: TestDb) {
-  await db.su.query(readFileSync(path.join(ROOT, "db", "dev", "pos_recovery_mock.sql"), "utf8"));
-}
+// Step 6 (223): the POS Recovery V1 operator-interface MOCK (db/dev/pos_recovery_mock.sql) in its OWN database — a
+// stand-in for the separate POS database — reached from the Control test database over the network bridge (dblink to
+// 127.0.0.1:55440), as a POS login that is a member of orvix_recovery_operator only. Nothing is granted to a control role.
+export type PosMock = { name: string; su: pg.Pool; bridgeUser: string; settings: BridgeSettings; drop: () => Promise<void> };
 
-export async function revokePosRecoveryGrant(su: pg.Pool) {
-  await su.query(`DO $$ BEGIN
-    IF to_regrole('orvix_recovery_operator') IS NOT NULL THEN REVOKE orvix_recovery_operator FROM control_definer; END IF;
-  END $$`);
+export async function installPosRecoveryMock(db: TestDb): Promise<PosMock> {
+  loadDevEnv();
+  const name = `orvix_posmock_${randomBytes(5).toString("hex")}`;
+  const bridgeUser = `orvix_control_bridge_${randomBytes(4).toString("hex")}`;
+  const password = randomBytes(24).toString("hex");
+  const admin = new pg.Client({ ...superuserConfig(), database: "orvix_control" });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE ${name}`);
+    await admin.query(`REVOKE ALL ON DATABASE ${name} FROM PUBLIC`);
+    await admin.query(`CREATE ROLE ${bridgeUser} LOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${admin.escapeLiteral(password)}`);
+    await admin.query(`GRANT CONNECT ON DATABASE ${name} TO ${bridgeUser}`);
+  } finally { await admin.end(); }
+  const su = new pg.Pool({ ...superuserConfig(), database: name, max: 2 });
+  await su.query(readFileSync(path.join(ROOT, "db", "dev", "pos_recovery_mock.sql"), "utf8"));
+  await su.query(`GRANT orvix_recovery_operator TO ${bridgeUser} WITH INHERIT TRUE, SET FALSE, ADMIN FALSE`);
+  const settings: BridgeSettings = { host: "127.0.0.1", port: 55440, dbname: name, user: bridgeUser, password, sslmode: "disable", insecureDev: true };
+  const c = await db.su.connect();
+  try { await configurePosBridge(c, settings); } finally { c.release(); }
+  return {
+    name, su, bridgeUser, settings,
+    drop: async () => {
+      await su.end();
+      const a = new pg.Client({ ...superuserConfig(), database: "orvix_control" });
+      await a.connect();
+      try {
+        await a.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+        await a.query(`DROP ROLE IF EXISTS ${bridgeUser}`);
+      } finally { await a.end(); }
+    },
+  };
 }

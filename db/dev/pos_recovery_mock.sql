@@ -3,15 +3,16 @@
 --
 -- It reproduces EXACTLY the seven signatures of the POS functions `recovery_v1.operator_*` (Orvix POS,
 -- supabase/migrations-provisional/RECOVERY_V1_guards.sql, Step 5; checked-in contract: docs/pos_recovery_contract.json)
--- with synthetic state in mock tables, so Control's bridge (migration 222) can be tested end to end. It does NOT verify
--- owner signatures: a signature beginning with "bad" is refused, any other is accepted. All data is invented.
+-- with synthetic state in mock tables. It does NOT verify owner signatures: a signature beginning with "bad" is refused,
+-- any other is accepted. All data is invented.
+--
+-- Step 6 (223): the mock is loaded into its OWN database (a stand-in for the separate POS database), never into a
+-- control database. Control reaches it over the network bridge (dblink) as a POS login that is a member of
+-- orvix_recovery_operator only (tests/helpers/db.ts installPosRecoveryMock). For the REAL POS, see the POS repository
+-- tools/recovery-v1/step6/.
 --
 -- Like the POS: the functions are SECURITY DEFINER with a pinned search_path, EXECUTE is granted ONLY to the NOLOGIN
 -- role orvix_recovery_operator, and they return recovery metadata and counts only. The mock reads no public.* table.
---
--- The single-database grant `GRANT orvix_recovery_operator TO control_definer` is a POS-owner decision in a real
--- deployment; here it is made by the mock setup only (inherit, no SET, no ADMIN). Role memberships are CLUSTER-WIDE:
--- tests that load this file revoke it again (tests/helpers/db.ts dropPosRecoveryMock).
 DO $role$
 BEGIN
   IF to_regrole('orvix_recovery_operator') IS NULL THEN
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS recovery_v1.mock_owner_keys (key_id text PRIMARY KEY,
 CREATE TABLE IF NOT EXISTS recovery_v1.mock_enrollments (
   enrollment_id uuid PRIMARY KEY, org_id text NOT NULL REFERENCES recovery_v1.mock_orgs, shop_id text NOT NULL, device_id text NOT NULL,
   key_fingerprint text NOT NULL, state text NOT NULL CHECK (state IN ('ACTIVE', 'SUSPENDED', 'REVOKED', 'EXPIRED')),
-  not_after timestamptz NOT NULL, replaces uuid, approved_at timestamptz NOT NULL DEFAULT now());
+  not_after timestamptz NOT NULL, replaces uuid, approved_at timestamptz NOT NULL DEFAULT now(), suspension_event_id bigint);
 CREATE TABLE IF NOT EXISTS recovery_v1.mock_requests (
   request_id uuid PRIMARY KEY, org_id text NOT NULL REFERENCES recovery_v1.mock_orgs, shop_id text NOT NULL, device_id text NOT NULL,
   key_fingerprint text NOT NULL, request_nonce uuid NOT NULL, replaces uuid, requested_at timestamptz NOT NULL DEFAULT now(), requested_by text NOT NULL);
@@ -85,7 +86,8 @@ BEGIN
        'pendingRequests', (SELECT count(*) FROM recovery_v1.mock_requests q WHERE q.org_id = p_org
                             AND NOT EXISTS (SELECT 1 FROM recovery_v1.mock_enrollments e WHERE e.enrollment_id = q.request_id)),
        'enrollments', (SELECT coalesce(jsonb_agg(jsonb_build_object('enrollmentId', e.enrollment_id, 'shopId', e.shop_id, 'deviceId', e.device_id,
-            'keyFingerprint', e.key_fingerprint, 'state', e.state, 'notAfter', e.not_after, 'replaces', e.replaces) ORDER BY e.approved_at), '[]'::jsonb)
+            'keyFingerprint', e.key_fingerprint, 'state', e.state, 'notAfter', e.not_after, 'replaces', e.replaces,
+            'suspensionEventId', CASE WHEN e.state = 'SUSPENDED' THEN e.suspension_event_id END) ORDER BY e.approved_at), '[]'::jsonb)
           FROM recovery_v1.mock_enrollments e WHERE e.org_id = p_org)),
     'ownerAuthority', (SELECT coalesce(jsonb_agg(jsonb_build_object('keyId', k.key_id, 'fingerprint', k.fingerprint, 'scope', k.scope) ORDER BY k.key_id), '[]'::jsonb)
           FROM recovery_v1.mock_owner_keys k WHERE k.scope IN ('*', p_org)));
@@ -134,11 +136,13 @@ BEGIN
       INSERT INTO recovery_v1.mock_audit (org_id, kind, detail, actor) VALUES (v_org, 'device_enrolled', jsonb_build_object('enrollmentId', q.request_id, 'submittedBy', v_by), v_by);
       RETURN jsonb_build_object('outcome', 'enrolled', 'enrollmentId', q.request_id, 'orgId', v_org, 'deviceId', q.device_id, 'state', 'ACTIVE');
     ELSIF v_purpose = 'device-reinstate' THEN
-      UPDATE recovery_v1.mock_enrollments SET state = 'ACTIVE' WHERE enrollment_id = (a->>'enrollmentId')::uuid AND org_id = v_org AND state = 'SUSPENDED';
+      -- the real POS payload shape: device.{enrollmentId, keyFingerprint, suspensionEventId}
+      UPDATE recovery_v1.mock_enrollments SET state = 'ACTIVE', suspension_event_id = NULL WHERE enrollment_id = (a#>>'{device,enrollmentId}')::uuid AND org_id = v_org AND state = 'SUSPENDED'
+         AND suspension_event_id IS NOT DISTINCT FROM (a#>>'{device,suspensionEventId}')::bigint;
       GET DIAGNOSTICS v_n = ROW_COUNT;
       IF v_n = 0 THEN RAISE EXCEPTION 'RECOVERY_V1_DEVICE_REINSTATE_INVALID: only a suspended enrollment of this organization'; END IF;
-      INSERT INTO recovery_v1.mock_audit (org_id, kind, detail, actor) VALUES (v_org, 'device_reinstated', jsonb_build_object('enrollmentId', a->>'enrollmentId', 'submittedBy', v_by), v_by);
-      RETURN jsonb_build_object('outcome', 'reinstated', 'enrollmentId', a->>'enrollmentId', 'orgId', v_org, 'state', 'ACTIVE');
+      INSERT INTO recovery_v1.mock_audit (org_id, kind, detail, actor) VALUES (v_org, 'device_reinstated', jsonb_build_object('enrollmentId', a#>>'{device,enrollmentId}', 'submittedBy', v_by), v_by);
+      RETURN jsonb_build_object('outcome', 'reinstated', 'enrollmentId', a#>>'{device,enrollmentId}', 'orgId', v_org, 'state', 'ACTIVE');
     ELSE
       IF s.state <> 'RECONCILING' THEN RAISE EXCEPTION 'RECOVERY_V1_REOPEN_STATE: reopening requires the organization to be RECONCILING (now %)', s.state; END IF;
       SELECT * INTO rep FROM recovery_v1.mock_reports WHERE org_id = v_org AND incident_id IS NOT DISTINCT FROM s.incident_id ORDER BY created_at DESC LIMIT 1;
@@ -169,7 +173,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION recovery_v1.operator_contain_device(p_org text, p_enrollment uuid, p_action text, p_reason text, p_actor text) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-DECLARE e recovery_v1.mock_enrollments; v_state text; v_by text := recovery_v1.mock_actor(p_actor);
+DECLARE e recovery_v1.mock_enrollments; v_state text; v_by text := recovery_v1.mock_actor(p_actor); v_ev bigint;
 BEGIN
   SELECT * INTO e FROM recovery_v1.mock_enrollments WHERE enrollment_id = p_enrollment AND org_id = p_org FOR UPDATE;
   IF e.enrollment_id IS NULL OR p_action IS NULL OR p_action NOT IN ('suspend', 'revoke') OR length(btrim(coalesce(p_reason, ''))) NOT BETWEEN 3 AND 300 THEN
@@ -177,10 +181,10 @@ BEGIN
   END IF;
   -- a revoked enrollment stays revoked
   v_state := CASE WHEN e.state = 'REVOKED' OR p_action = 'revoke' THEN 'REVOKED' ELSE 'SUSPENDED' END;
-  UPDATE recovery_v1.mock_enrollments SET state = v_state WHERE enrollment_id = e.enrollment_id;
   INSERT INTO recovery_v1.mock_audit (org_id, kind, detail, actor) VALUES (p_org, CASE p_action WHEN 'suspend' THEN 'device_suspended' ELSE 'device_revoked' END,
-    jsonb_build_object('enrollmentId', e.enrollment_id, 'deviceId', e.device_id, 'reason', btrim(p_reason), 'by', v_by), v_by);
-  RETURN jsonb_build_object('outcome', CASE p_action WHEN 'suspend' THEN 'suspended' ELSE 'revoked' END, 'enrollmentId', e.enrollment_id, 'state', v_state);
+    jsonb_build_object('enrollmentId', e.enrollment_id, 'deviceId', e.device_id, 'reason', btrim(p_reason), 'by', v_by), v_by) RETURNING id INTO v_ev;
+  UPDATE recovery_v1.mock_enrollments SET state = v_state, suspension_event_id = v_ev WHERE enrollment_id = e.enrollment_id;
+  RETURN jsonb_build_object('outcome', CASE p_action WHEN 'suspend' THEN 'suspended' ELSE 'revoked' END, 'enrollmentId', e.enrollment_id, 'state', v_state, 'eventId', v_ev);
 END $$;
 
 -- containment only: ACTIVE (or anything else) is always denied; only an owner-signed reopening sets ACTIVE
@@ -252,7 +256,3 @@ INSERT INTO recovery_v1.mock_requests (request_id, org_id, shop_id, device_id, k
   ('a2000000-0000-4000-8000-0000000000b2', 'org-synthetic-b', 'shop-synthetic-b1', 'till-b2', 'b2f00000000000000000000000000000000000000000000000000000000000b2',
    'c2000000-0000-4000-8000-0000000000b2', 'user:synthetic-admin-b')
 ON CONFLICT DO NOTHING;
-
--- POS-owner decision in a real single-database deployment; mock setup only here. Inherit (so the SECURITY DEFINER
--- wrappers owned by control_definer may EXECUTE), no SET ROLE, no ADMIN.
-GRANT orvix_recovery_operator TO control_definer WITH INHERIT TRUE, SET FALSE, ADMIN FALSE;
