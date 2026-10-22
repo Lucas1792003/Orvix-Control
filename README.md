@@ -2,7 +2,7 @@
 
 Platform Admin Console for Orvix: a **local development foundation**. It is separate from the Orvix POS repository and has no Git remote.
 
-> Synthetic tenants and mock health data only. No POS connection, no production credentials, no real tenant administration, no recovery-release authority, no billing.
+> Synthetic tenants and mock health data only. No production credentials, no real tenant administration, no recovery-release authority, no billing. The only POS path is the POS-owned Recovery V1 operator interface (`recovery_v1.operator_*`, migration 222), when the POS has installed and granted it; in development it is a mock.
 
 ## Isolated resources
 
@@ -22,6 +22,7 @@ npm install
 npm run db:up          # preflight, generate .env.local (app), .env.host (superuser), .env.sentinel (all 0600, dev-only random passwords), start Postgres
 npm run db:migrate     # apply db/migrations/2xx (own ledger: control_ledger.schema_migrations)
 npm run db:seed        # synthetic tenants + pos_mock stand-in tenant tables
+npm run db:seed -- --pos-recovery-mock   # optional: MOCK of the POS recovery_v1 operator interface (cluster-wide role grant)
 npm run bootstrap-owner -- --email you@example.invalid --name "Your Name"   # HOST ONLY (superuser): one-time enrolment URL
 npm run host -- notify-add --recipient host --kind file --target /absolute/path/notices.jsonl   # HOST ONLY: out-of-band channel
 npm run sentinel       # separate process: delivers out-of-band notices + transaction watchdog (needed for gated actions)
@@ -33,12 +34,13 @@ The web server loads only `.env.local` and refuses to start if a superuser or se
 ## Tests
 
 ```bash
-npm test               # 264 DB tests: crypto (vs OpenSSL), trust boundary, privileges, auth/sessions, passkeys,
+npm test               # 292 DB tests: crypto (vs OpenSSL), trust boundary, privileges, auth/sessions, passkeys,
                        # recovery, audit integrity, anchors/offline verification, upgrade continuity, guards,
                        # C1.2 (notifications, scoped login limits, watchdog, shadow log, invitations, rollback drill),
-                       # C1.3 (watchdog intents, recovery hardening, privileges/restore, sentinel delivery, regressions)
+                       # C1.3 (watchdog intents, recovery hardening, privileges/restore, sentinel delivery, regressions),
+                       # Step 5 POS recovery bridge (contract vs mock, role/step-up, audit coupling, unavailable hook)
 ORVIX_CRASH_TESTS=disposable-cluster npm run test:crash   # DISPOSABLE CLUSTERS ONLY: real backend/sentinel crashes (W-1)
-npm run test:e2e       # builds, starts `next start` on :3410 against orvix_control_e2e, 23 HTTP tests
+npm run test:e2e       # builds, starts `next start` on :3410 against orvix_control_e2e, 31 HTTP tests
 
 # host / owner tools
 npm run host -- recovery-request|recovery-confirm|recovery-cancel|revoke-operator|purge-expired …   # HOST ONLY (superuser)
@@ -65,11 +67,11 @@ Browser ──(passkey, __Host- cookie, CSRF header)──▶ Next.js (route han
                                      └─ control.audit_append → hash-chained audit (owner control_audit_owner)
 ```
 
-- `control_app` holds USAGE on schema `control` and EXECUTE on 31 `api_*` functions. It has no table privileges anywhere.
+- `control_app` holds USAGE on schema `control` and EXECUTE on 38 `api_*` functions. It has no table privileges anywhere.
 - **The database verifies WebAuthn evidence itself** (ES256 in PL/pgSQL, DB-issued challenges). The app's password alone cannot create a session, a step-up grant or a passkey. See `docs/AUTH_TRUST_BOUNDARY.md`.
 - Owner roles: `control_auth` (authentication), `control_definer` (tenant model), `control_audit_owner` (audit log and its read API), plus an inert `control_schema_owner`. No runtime role can run code as another one, or holds a privilege on another's table.
 - Every `api_*` returns `{ok:true,…}` or `{ok:false,error}`. Every effect is audited atomically with it; refusals are audited unless the caller rolls back (a documented residual). The app treats anything else as a refusal (fail closed).
-- Migrations: `200` foundation and roles · `201` audit log · `202` identities, sessions · `203` lifecycle model and audit API · `204` ES256 verifier · `205` trust boundary, multiple passkeys, step-up grants, recovery · `206` passkey anchors and export · `207` review hardening · `208` review round 2 · `209` review round 3 · `210` final checkpoint review · `211` final follow-ups · `212` out-of-band notifications and delivery gating · `213` scoped login limits · `214` transaction watchdog and shadow audit log · `215` operator invitations · `216` 211-review fixes · `217` C1.2-review fixes · `218` crash-consistent watchdog intents · `219` recovery/auth hardening · `220` sentinel delivery isolation and status · `221` database ACL, tenant replay isolation, contract 0.5 (C1.3, provisional). Compatibility: [docs/MIGRATIONS_C1_2.md](docs/MIGRATIONS_C1_2.md), [docs/MIGRATIONS_C1_3.md](docs/MIGRATIONS_C1_3.md) (C1.3 needs cluster prerequisites: hardened `pg_hba`, `harden-cluster`, `init: true`).
+- Migrations: `200` foundation and roles · `201` audit log · `202` identities, sessions · `203` lifecycle model and audit API · `204` ES256 verifier · `205` trust boundary, multiple passkeys, step-up grants, recovery · `206` passkey anchors and export · `207` review hardening · `208` review round 2 · `209` review round 3 · `210` final checkpoint review · `211` final follow-ups · `212` out-of-band notifications and delivery gating · `213` scoped login limits · `214` transaction watchdog and shadow audit log · `215` operator invitations · `216` 211-review fixes · `217` C1.2-review fixes · `218` crash-consistent watchdog intents · `219` recovery/auth hardening · `220` sentinel delivery isolation and status · `221` database ACL, tenant replay isolation, contract 0.5 (C1.3, provisional) · `222` POS recovery bridge, contract 0.6 (Step 5, provisional; [docs/POS_INTEGRATION_REQUIREMENTS.md](docs/POS_INTEGRATION_REQUIREMENTS.md) §10). Compatibility: [docs/MIGRATIONS_C1_2.md](docs/MIGRATIONS_C1_2.md), [docs/MIGRATIONS_C1_3.md](docs/MIGRATIONS_C1_3.md) (C1.3 needs cluster prerequisites: hardened `pg_hba`, `harden-cluster`, `init: true`).
 - Out-of-band notices and the sentinel: [docs/OOB_NOTIFICATIONS.md](docs/OOB_NOTIFICATIONS.md) (webhook receivers must verify the signature and return `X-Orvix-Ack`).
 
 ## Docs

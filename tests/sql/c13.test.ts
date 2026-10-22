@@ -529,7 +529,7 @@ describe("tenant request-id isolation", () => {
 });
 
 // =====================================================================================================================
-describe("upgrade 217 -> 221, rollback by restore, re-upgrade", () => {
+describe("upgrade 217 -> 222, rollback by restore, re-upgrade", () => {
   it("217 state survives the upgrade; legacy watchdog kills fold; a 217-era claim is re-claimable; restore + re-upgrade is clean", async () => {
     const d = await createTestDb({ seed: true, upTo: "217" });
     const restored = `orvix_control_test_${randomBytes(5).toString("hex")}`;
@@ -543,10 +543,10 @@ describe("upgrade 217 -> 221, rollback by restore, re-upgrade", () => {
       const dump = execFileSync("docker", ["exec", "orvix-control-db", "pg_dump", "-U", "orvix_control_super", "-Fc", d.name], { maxBuffer: 64 << 20 });
       const c = new pg.Client({ ...superuserConfig(), database: d.name }); await c.connect();
       const { applied } = await migrate(c);
-      expect(applied).toEqual(["218_watchdog_intents.sql", "219_recovery_auth_hardening.sql", "220_sentinel_delivery.sql", "221_privileges_tenant_contract.sql"]);
+      expect(applied).toEqual(["218_watchdog_intents.sql", "219_recovery_auth_hardening.sql", "220_sentinel_delivery.sql", "221_privileges_tenant_contract.sql", "222_pos_recovery_bridge.sql"]);
       expect((await c.query("SELECT ok FROM control.audit_verify()")).rows[0].ok).toBe(true);
       expect((await c.query("SELECT count(*)::int n FROM control.audit_events WHERE seq <= $1", [head217])).rows[0].n).toBe(head217 + 1);
-      expect((await c.query("SELECT control.api_contract_version() AS v")).rows[0].v).toBe("orvix-control/0.5");
+      expect((await c.query("SELECT control.api_contract_version() AS v")).rows[0].v).toBe("orvix-control/0.6");
       await c.end();
       const sp = sentinelPool(d);
       try {
@@ -566,7 +566,7 @@ describe("upgrade 217 -> 221, rollback by restore, re-upgrade", () => {
       expect((await r.query("SELECT to_regclass('control.watchdog_intents') AS t")).rows[0].t).toBeNull();
       expect((await r.query("SELECT ok FROM control.audit_verify()")).rows[0].ok).toBe(true);
       const re = await migrate(r);
-      expect(re.applied).toHaveLength(4);
+      expect(re.applied).toHaveLength(5);
       expect((await r.query("SELECT ok FROM control.audit_verify()")).rows[0].ok).toBe(true);
       await r.end();
       const app = new pg.Client({ ...appConfig(), database: restored }); await app.connect();

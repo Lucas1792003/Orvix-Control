@@ -31,7 +31,8 @@ export const transitionBody = z.object({
 });
 
 export const stepupBody = z.object({
-  action: z.enum(["tenant_transition", "credential_add", "credential_revoke", "recovery_approve", "recovery_cancel", "operator_invite"]),
+  action: z.enum(["tenant_transition", "credential_add", "credential_revoke", "recovery_approve", "recovery_cancel", "operator_invite",
+                  "pos_recovery_transition", "pos_recovery_contain", "pos_recovery_submit"]),
   target: z.string().regex(/^[A-Za-z0-9:_-]{1,200}$/),
 });
 
@@ -41,4 +42,26 @@ export const inviteBody = z.object({
   email: z.string().trim().toLowerCase().max(254).regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/),
   displayName: z.string().trim().min(1).max(80),
   role: z.enum(["owner", "admin"]),
+});
+
+// Step 5 (222): POS recovery bridge. Shape checks only; the database re-checks everything and the POS decides.
+export const posOrgId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
+// Containment only. There is deliberately no "ACTIVE": only an owner-signed reopening (submitted below) sets it.
+export const posTransitionBody = z.object({
+  to: z.enum(["RESTRICTED", "RECONCILING", "QUARANTINED"]),
+  reason: z.string().trim().min(10).max(500),
+  evidenceReference: z.string().trim().min(3).max(500),
+  requestId: z.uuid(),
+});
+export const posContainBody = z.object({
+  action: z.enum(["suspend", "revoke"]),
+  reason: z.string().trim().min(10).max(300),
+  requestId: z.uuid(),
+});
+export const posReportBody = z.object({ requestId: z.uuid() });
+// The authorization text is carried byte for byte (never trimmed or re-serialized): the step-up target is its SHA-256.
+export const posSubmitBody = z.object({
+  authorization: z.string().min(2).max(65_536),
+  signature: z.string().regex(/^[0-9a-fA-F]+$/).min(2).max(4096),
+  requestId: z.uuid(),
 });

@@ -10,6 +10,9 @@ const EXPECTED_APP_FUNCTIONS = [
   "api_enrol_begin", "api_enrol_complete", "api_login_begin", "api_login_complete", "api_operator_invite", "api_operator_invite_revoke",
   "api_operator_list", "api_recovery_approve", "api_recovery_cancel", "api_recovery_list", "api_session_get", "api_session_revoke", "api_stepup_begin", "api_stepup_complete",
   "api_tenant_get", "api_tenant_list", "api_tenant_transition",
+  // 222: POS recovery bridge (owned by control_definer)
+  "api_pos_recovery_audit", "api_pos_recovery_contain_device", "api_pos_recovery_org", "api_pos_recovery_overview",
+  "api_pos_recovery_report", "api_pos_recovery_submit", "api_pos_recovery_transition",
 ].sort();
 // api_* functions and the role that must own each group.
 const AUTH_OWNED = ["api_anchor_begin", "api_anchor_complete", "api_auth_failed", "api_credential_add_begin",

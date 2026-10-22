@@ -31,6 +31,13 @@ const STATUS: Record<string, number> = {
   IDENTITY_UNDER_RECOVERY: 409,
   CREDENTIAL_FLAGGED: 403,
   CREDENTIAL_PENDING: 403,
+  // Step 5 (222): POS recovery bridge
+  POS_RECOVERY_UNAVAILABLE: 503,
+  POS_RECOVERY_REFUSED: 409,
+  POS_RECOVERY_DENIED: 409,
+  POS_RECOVERY_STATE: 409,
+  POS_RECOVERY_INVALID: 400,
+  POS_RECOVERY_ERROR: 502,
 };
 
 export function json(body: Record<string, unknown>, status = 200, requestId: string = randomUUID()) {

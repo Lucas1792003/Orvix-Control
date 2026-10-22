@@ -1,0 +1,30 @@
+{
+  "contract": "orvix-pos-recovery-operator/1",
+  "source": "Orvix POS Recovery V1, supabase/migrations-provisional/RECOVERY_V1_guards.sql (Step 5 operator interface, docs/recovery-v1/STEP5-DESIGN.md section 4)",
+  "note": "Checked-in copy of the POS-owned operator interface that Control calls. tests/sql/pos-recovery.test.ts compares it with the dev mock (db/dev/pos_recovery_mock.sql) and with migration 222's own hook list, so a POS signature change must be reflected here deliberately.",
+  "schema": "recovery_v1",
+  "role": "orvix_recovery_operator",
+  "roleAttributes": { "login": false, "superuser": false, "inherit": false },
+  "functions": [
+    { "name": "operator_overview", "identityArguments": "", "returns": "jsonb", "volatility": "stable", "securityDefiner": true },
+    { "name": "operator_organization", "identityArguments": "p_org text", "returns": "jsonb", "volatility": "stable", "securityDefiner": true },
+    { "name": "operator_submit", "identityArguments": "p_auth text, p_sig text, p_actor text", "returns": "jsonb", "volatility": "volatile", "securityDefiner": true },
+    { "name": "operator_contain_device", "identityArguments": "p_org text, p_enrollment uuid, p_action text, p_reason text, p_actor text", "returns": "jsonb", "volatility": "volatile", "securityDefiner": true },
+    { "name": "operator_transition", "identityArguments": "p_org text, p_state text, p_reason text, p_evidence_reference text, p_actor text", "returns": "jsonb", "volatility": "volatile", "securityDefiner": true },
+    { "name": "operator_reconciliation_report", "identityArguments": "p_org text, p_actor text", "returns": "jsonb", "volatility": "volatile", "securityDefiner": true },
+    { "name": "operator_audit", "identityArguments": "p_org text, p_limit integer", "returns": "jsonb", "volatility": "stable", "securityDefiner": true }
+  ],
+  "states": ["ACTIVE", "RESTRICTED", "RECONCILING", "QUARANTINED"],
+  "operatorTransitionTargets": ["RESTRICTED", "RECONCILING", "QUARANTINED"],
+  "submitPurposes": ["enroll-device", "device-reinstate", "reopen-organization"],
+  "submitOutcomes": ["enrolled", "reinstated", "reopened", "refused"],
+  "containActions": ["suspend", "revoke"],
+  "hardBlockerRule": "integrity:* | ledger_in_flight | state_not_reconciling",
+  "errors": {
+    "RECOVERY_V1_OPERATOR_INVALID": "operator_organization: unknown organization (22023)",
+    "RECOVERY_V1_DEVICE_CONTAIN_INVALID": "operator_contain_device: wrong enrollment / action / reason (22023)",
+    "RECOVERY_V1_RECONCILIATION_STATE": "operator_reconciliation_report: organization not RECONCILING (42501)",
+    "RECOVERY_V1_RECONCILIATION_RATE_LIMITED": "operator_reconciliation_report: 60 per organization and hour (54000)",
+    "RECOVERY_V1_SUBMISSION_RATE_LIMITED": "operator_submit: 60 refusals per submitter and hour (54000)"
+  }
+}

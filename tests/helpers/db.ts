@@ -218,3 +218,17 @@ export async function activatePending(db: TestDb) {
 export async function backdateDeliveries(db: TestDb) {
   await db.su.query("UPDATE control.notify_deliveries SET delivered_at = delivered_at - interval '1 day' WHERE delivered_at > now() - interval '1 day'");
 }
+
+// Step 5: the POS Recovery V1 operator-interface MOCK (db/dev/pos_recovery_mock.sql), loaded by the superuser. Its
+// `GRANT orvix_recovery_operator TO control_definer` is a CLUSTER-WIDE role membership: create every other test
+// database of the file BEFORE loading it (migration 207 refuses to run while a control role has memberships), and
+// call revokePosRecoveryGrant when done (test files run one at a time).
+export async function installPosRecoveryMock(db: TestDb) {
+  await db.su.query(readFileSync(path.join(ROOT, "db", "dev", "pos_recovery_mock.sql"), "utf8"));
+}
+
+export async function revokePosRecoveryGrant(su: pg.Pool) {
+  await su.query(`DO $$ BEGIN
+    IF to_regrole('orvix_recovery_operator') IS NOT NULL THEN REVOKE orvix_recovery_operator FROM control_definer; END IF;
+  END $$`);
+}

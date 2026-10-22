@@ -48,7 +48,22 @@ export const ERROR_TEXT: Record<string, string> = {
   ALREADY_EXISTS: "An operator or open invitation already exists for that email.",
   IDENTITY_UNDER_RECOVERY: "Your account has an open recovery request. Privileged actions are paused until it is completed or cancelled.",
   CREDENTIAL_FLAGGED: "This passkey was flagged as possibly cloned. Use another passkey, or have it revoked.",
+  POS_RECOVERY_UNAVAILABLE: "BLOCKED: the POS recovery interface (recovery_v1 operator hook) is not installed or not granted to Control.",
+  POS_RECOVERY_REFUSED: "The POS verifier refused this owner authorization. Its reason is in the POS recovery history below.",
+  POS_RECOVERY_DENIED: "The POS denied this transition.",
+  POS_RECOVERY_STATE: "A reconciliation report can only be recorded while the organization is RECONCILING.",
+  POS_RECOVERY_INVALID: "The POS refused the request (unknown enrollment for this organization, or invalid input).",
+  POS_RECOVERY_ERROR: "The POS recovery interface failed. Nothing was changed.",
+  INVALID_INPUT: "The input was refused. Check the fields and try again.",
+  NOT_FOUND: "Not found.",
+  REQUEST_ID_CONFLICT: "That request id was already used for a different request. Reload and try again.",
 };
+
+// SHA-256 hex of exactly these bytes (UTF-8): step-up targets bound to a document (owner authorizations, invitations).
+export async function sha256Hex(s: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 export function downloadJson(name: string, data: unknown) {
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));

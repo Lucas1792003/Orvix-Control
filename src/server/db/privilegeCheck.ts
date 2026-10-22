@@ -11,6 +11,12 @@ const REVOKED_BUILTINS = ["pg_advisory_lock", "pg_advisory_lock_shared", "pg_try
 
 const OWNERS = "'{control_auth,control_definer,control_audit_owner,control_schema_owner,control_watchdog_owner}'::text[]";
 
+// Step 5 (222): role memberships of the control roles. The ONLY tolerated ones are control_watchdog_owner's two built-in
+// monitoring roles (218) and, when the POS role exists, the POS-owner's single-database grant
+// `orvix_recovery_operator TO control_definer` with INHERIT only (no SET ROLE, no ADMIN). That role must itself be a
+// plain NOLOGIN role that is a member of nothing (so nothing further is inherited through it).
+const CONTROL_ROLES = "'{control_app,control_auth,control_definer,control_audit_owner,control_schema_owner,control_sentinel,control_watchdog_owner}'::text[]";
+
 export const PRIVILEGE_CHECK_SQL = `
   SELECT has_database_privilege(current_user, current_database(), 'TEMP') AS temp_here,
          has_database_privilege(current_user, current_database(), 'CREATE') AS create_here,
@@ -32,10 +38,18 @@ export const PRIVILEGE_CHECK_SQL = `
          ((SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner
             WHERE n.nspname = 'control' AND r.rolname <> ALL (${OWNERS}))
           + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner
-              WHERE n.nspname = 'control' AND r.rolname <> ALL (${OWNERS})))::int AS superuser_owned`;
+              WHERE n.nspname = 'control' AND r.rolname <> ALL (${OWNERS})))::int AS superuser_owned,
+         (SELECT count(*) FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member
+           WHERE (m.rolname = ANY (${CONTROL_ROLES}) OR g.rolname = ANY (${CONTROL_ROLES}))
+             AND NOT (m.rolname = 'control_watchdog_owner' AND g.rolname IN ('pg_read_all_stats', 'pg_signal_backend') AND NOT a.admin_option)
+             AND NOT (m.rolname = 'control_definer' AND g.rolname = 'orvix_recovery_operator'
+                      AND a.inherit_option AND NOT a.set_option AND NOT a.admin_option
+                      AND NOT g.rolcanlogin AND NOT g.rolsuper AND NOT g.rolbypassrls AND NOT g.rolcreaterole AND NOT g.rolcreatedb
+                      AND NOT g.rolreplication
+                      AND NOT EXISTS (SELECT 1 FROM pg_auth_members x WHERE x.member = g.oid)))::int AS memberships`;
 
 export type PrivilegeRow = { temp_here: boolean; create_here: boolean; public_here: boolean; other_dbs: number; builtins: number;
-  plpgsql: boolean; superuser_owned: number };
+  plpgsql: boolean; superuser_owned: number; memberships: number };
 
 export function privilegeProblems(r: PrivilegeRow | undefined): string[] {
   if (!r) return ["privilege check returned nothing"];
@@ -47,5 +61,6 @@ export function privilegeProblems(r: PrivilegeRow | undefined): string[] {
   if (r.builtins !== 0) out.push("role can execute revoked built-in functions (advisory locks, large objects, NOTIFY, WAL or xid)");
   if (r.plpgsql !== false) out.push("role has USAGE on plpgsql");
   if (r.superuser_owned !== 0) out.push("control objects are owned by a superuser or another unexpected role (restored with --no-owner?)");
+  if (r.memberships !== 0) out.push("a control role has an unexpected role membership (only orvix_recovery_operator -> control_definer, inherit-only, is tolerated)");
   return out;
 }

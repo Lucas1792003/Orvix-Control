@@ -5,6 +5,7 @@ import { LogoutButton } from "./LogoutButton";
 const NAV = [
   { href: "/", label: "Overview" },
   { href: "/tenants", label: "Tenants" },
+  { href: "/pos-recovery", label: "POS recovery" },
   { href: "/audit", label: "Audit log" },
   { href: "/health", label: "Health" },
   { href: "/security", label: "Security" },
@@ -15,7 +16,7 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
   return (
     <div className="min-h-screen">
       <div className="bg-mock/10 px-4 py-1.5 text-center text-xs text-mock">
-        Local development · synthetic tenants and mock health data only · no POS connection
+        Local development · synthetic tenants and mock health data only · POS reached only through its recovery_v1 operator interface, when installed
       </div>
       <header className="border-b border-line bg-panel">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">

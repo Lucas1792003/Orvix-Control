@@ -56,6 +56,14 @@ const API = {
   api_anchor_complete: 6,
   api_anchor_list: 1,
   api_anchor_export: 2,
+  // Step 5 (222): POS recovery bridge (recovery_v1.operator_* through control_definer; metadata only)
+  api_pos_recovery_overview: 1,
+  api_pos_recovery_org: 2,
+  api_pos_recovery_audit: 3,
+  api_pos_recovery_transition: 6,
+  api_pos_recovery_contain_device: 6,
+  api_pos_recovery_report: 3,
+  api_pos_recovery_submit: 4,
 } as const;
 export type ApiName = keyof typeof API;
 
@@ -66,7 +74,8 @@ async function ensureContract(): Promise<void> {
   // Startup integrity checks (fail closed): expected contract and cluster; every SECURITY DEFINER function in
   // `control` pins a search_path ending in pg_temp; this role's defaults have not been altered; no prepared
   // transactions; (C1.3 M3/M4) the control database's ACL grants nothing to PUBLIC and no TEMP to this role, this role
-  // cannot CONNECT to any non-control database, and the 217 built-in revocations are in place.
+  // cannot CONNECT to any non-control database, and the 217 built-in revocations are in place; (222) no control role
+  // has a role membership other than the tolerated inherit-only orvix_recovery_operator -> control_definer.
   const { rows } = await pool().query(`
     SELECT control.api_contract_version() AS v, current_setting('cluster_name') AS cluster,
            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace

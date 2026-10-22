@@ -47,3 +47,37 @@ export async function listAudit(s: Session, limit = 50, beforeSeq: number | null
   if (!r.ok) throw new Error(r.error);
   return { scope: r.scope as "all" | "own", events: r.events as AuditEvent[] };
 }
+
+// ------------------------------------------------------------ Step 5 (222): POS recovery bridge (metadata only)
+export type PosEnrollment = { enrollmentId: string; shopId: string; deviceId: string; keyFingerprint: string; state: string; notAfter: string | null; replaces: string | null };
+export type PosDeviceRequest = { requestId: string; shopId: string; deviceId: string; keyFingerprint: string; shortCode: string; requestNonce: string;
+  replaces: string | null; requestedAt: string; requestedBy: string };
+export type PosOrg = {
+  orgId: string; state: "ACTIVE" | "RESTRICTED" | "RECONCILING" | "QUARANTINED"; incidentId: string | null; recoveryEpoch: number | null;
+  activation: string | null;
+  reopening: { reopenId: string; decision: string; acceptedBlockers: string[]; uncertainties: string[]; byKey: string; at: string } | null;
+  lastReport: { reportId: string; digest: string; blockers: string[]; hardBlockers: string[]; at: string; facts: Record<string, unknown> } | null;
+  devices: { pendingRequests: number; enrollments: PosEnrollment[] };
+  ownerAuthority: { keyId: string; fingerprint: string; scope: string }[];
+  deviceRequests?: PosDeviceRequest[];
+  reopenBlockedBy: string[];
+};
+export type PosAuditEvent = { id: number; kind: string; detail: Record<string, unknown>; actor: string | null; at: string };
+
+// Errors are returned, not thrown: the page must say clearly when the POS hook is unavailable (BLOCKED).
+export async function posRecoveryOverview(s: Session): Promise<{ ok: true; organizations: PosOrg[] } | { ok: false; error: string }> {
+  const r = await call("api_pos_recovery_overview", s);
+  return r.ok ? { ok: true, organizations: r.organizations as PosOrg[] } : { ok: false, error: r.error };
+}
+
+export async function posRecoveryOrg(s: Session, org: string): Promise<{ ok: true; organization: PosOrg } | { ok: false; error: string }> {
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(org)) return { ok: false, error: "INVALID_INPUT" };
+  const r = await call("api_pos_recovery_org", s, org);
+  return r.ok ? { ok: true, organization: r.organization as PosOrg } : { ok: false, error: r.error };
+}
+
+export async function posRecoveryAudit(s: Session, org: string, limit = 50): Promise<{ ok: true; events: PosAuditEvent[] } | { ok: false; error: string }> {
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(org)) return { ok: false, error: "INVALID_INPUT" };
+  const r = await call("api_pos_recovery_audit", s, org, limit);
+  return r.ok ? { ok: true, events: r.events as PosAuditEvent[] } : { ok: false, error: r.error };
+}

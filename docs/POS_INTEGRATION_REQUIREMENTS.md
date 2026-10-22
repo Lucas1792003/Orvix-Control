@@ -117,3 +117,42 @@ From R2 §5.4 (C-1…C-8). None of this needs Orvix Control to exist; it is gate
 | D-22 | Schema `control`, `localhost` via SSH, no business activity visible | As stated |
 | S-1 (this repo) | Accept that `control_app` is owner-equivalent for authentication, or fund a separate verifier | Accept + offline re-verification of stored assertions |
 | CP S-10 | Invitation delivery: manual one-time links | Manual until email exists |
+
+## 10. Step 5: POS recovery bridge (migration 222, provisional, contract `orvix-control/0.6`)
+
+Control calls the POS-owned Recovery V1 operator interface and nothing else. The interface is fixed by the POS
+(`RECOVERY_V1_guards.sql`, STEP5-DESIGN.md §4); its signatures are checked in as `docs/pos_recovery_contract.json` and
+compared with the dev mock (`db/dev/pos_recovery_mock.sql`) and with 222's own hook list by `tests/sql/pos-recovery.test.ts`.
+
+| Control API (`control.api_pos_recovery_*`) | POS function | Roles | Step-up (action / target) |
+|---|---|---|---|
+| `overview(token)` | `operator_overview()` | owner, admin | none |
+| `org(token, org)` | `operator_organization(org)` | owner, admin | none |
+| `audit(token, org, limit 1-200)` | `operator_audit(org, limit)` | owner, admin | none |
+| `report(token, org, request_id)` | `operator_reconciliation_report(org, actor)` | owner, admin | none (only while RECONCILING, POS-enforced) |
+| `transition(token, org, to, reason, evidence, request_id)` | `operator_transition(...)` | owner, admin | `pos_recovery_transition` / `<org>:<RESTRICTED\|RECONCILING\|QUARANTINED>` |
+| `contain_device(token, org, enrollment, suspend\|revoke, reason, request_id)` | `operator_contain_device(...)` | owner, admin | `pos_recovery_contain` / `<org>:<enrollment>:<action>` |
+| `submit(token, authorization, signature, request_id)`: enroll-device, device-reinstate | `operator_submit(auth, sig, actor)` | owner, admin | `pos_recovery_submit` / `<purpose>:<sha256 hex of the text>` |
+| `submit(...)`: reopen-organization | `operator_submit(...)` | **owner only** | same |
+
+- **No recovery-release authority, no signing key.** `transition` refuses `ACTIVE` (and anything but the three
+  containment states) before calling the POS. Only an owner-signed reopening, verified by the POS, sets ACTIVE; Control
+  carries its text and hex signature unchanged and cannot create one. No Control function reads a POS table.
+- **Single-database prerequisite (POS-owner decision):** `GRANT orvix_recovery_operator TO control_definer WITH INHERIT
+  TRUE, SET FALSE, ADMIN FALSE`. Without it, or without all seven functions, every API returns
+  `POS_RECOVERY_UNAVAILABLE` (audited) and the page says BLOCKED. The app's startup check
+  (`src/server/db/privilegeCheck.ts`) tolerates that one inherit-only membership, and only while
+  `orvix_recovery_operator` is a plain NOLOGIN role that is itself a member of nothing; any other membership of a control
+  role stops the app.
+- **Ordering:** migration 207's preflight refuses to run while a control role has any membership, so Control's
+  migrations must be applied (fresh installs too) BEFORE the POS grants the role.
+- **Audit:** one Control audit row per call (`pos.recovery_*`, plus `platform.access_denied` for role refusals) in the
+  same transaction as the POS call. A POS exception is caught in a subtransaction (its partial effects roll back) and
+  mapped to `NOT_FOUND`, `POS_RECOVERY_INVALID`, `POS_RECOVERY_STATE`, `RATE_LIMITED`, `POS_RECOVERY_UNAVAILABLE` or
+  `POS_RECOVERY_ERROR`; a POS refusal is `POS_RECOVERY_REFUSED` / `POS_RECOVERY_DENIED`. Only the leading
+  `RECOVERY_V1_*` token (and, for refused submissions, the POS reason, 300 chars) is kept in the audit detail; POS text
+  never reaches the client. Containment and accepted submissions are out-of-band notices.
+- **Actor label** passed as `p_actor`: `control:<role>:<identity uuid>` (the POS appends `@<session_user>`).
+- **Open (POS side):** `orvix_recovery_operator` also holds EXECUTE on `recovery_v1.fence_key`, `request_unfence` and
+  `ledger_retention_report`. Through the grant, `control_definer` could execute them, although no Control code calls
+  them. If Control must hold strictly the seven operator functions, the POS should move those three to a separate role.
